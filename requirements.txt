@@ -17,7 +17,7 @@ sounddevice>=0.4.6
 numpy>=1.24.0
 wave>=0.0.2
 rich>=13.0.0
-async-timeout==5.0.1
+# async-timeout==5.0.1  # For asyncio timeout
 keyboard>=0.13.5
 
 # VTube Studio Integration
@@ -51,3 +51,9 @@ langchain-anthropic>=0.2.3
 
 # Message processing
 tiktoken>=0.5.2
+
+# Google Calendar Integration
+google-auth-oauthlib>=1.2.1
+google-auth-httplib2>=0.2.0
+google-api-python-client>=2.161.0
+retry_requests>=0.2.0

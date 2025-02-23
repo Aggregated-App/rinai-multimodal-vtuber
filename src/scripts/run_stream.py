@@ -102,9 +102,9 @@ async def main():
         
         console.print("\n[bold green]Services Started![/]")
         console.print("[yellow]Available Commands:[/]")
-        console.print("  [yellow]Alt+S: Toggle speech input[/]")
-        console.print("  [yellow]Alt+P: Pause/Resume all services[/]")
-        console.print("  [yellow]Alt+Q: Quit[/]")
+        console.print("  [yellow]F2: Toggle speech input[/]")
+        console.print("  [yellow]F3: Pause/Resume all services[/]")
+        console.print("  [yellow]ESC: Quit[/]")
         
         # Start the orchestrator
         await orchestrator.start()

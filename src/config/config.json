@@ -16,7 +16,7 @@
         }
     ],
     "mongodb": {
-        "db_name": "rin_multimodal",
+        "db_name": "${MONGO_DB}",
         "uri": "${MONGO_URI}"
     },
     "EL_data": [

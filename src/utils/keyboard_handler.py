@@ -18,10 +18,22 @@ class KeyboardHandler:
         self._speech_lock = threading.Lock()  # Add lock for speech state
         self._last_toggle_time = 0  # Add debounce timestamp
         
-        # Set up keyboard hooks
-        keyboard.add_hotkey('alt+q', self.stop)
-        keyboard.add_hotkey('alt+p', self.toggle_pause)
-        keyboard.add_hotkey('alt+s', self.toggle_speech)
+        # Set up keyboard hooks with Mac-friendly shortcuts
+        try:
+            # Use Esc for quit (universally accessible)
+            keyboard.add_hotkey('esc', self.stop, suppress=False)
+            
+            # Use function keys which are less likely to conflict
+            keyboard.add_hotkey('f2', self.toggle_speech)
+            keyboard.add_hotkey('f3', self.toggle_pause)
+            
+            console.print("[green]Keyboard controls initialized:")
+            console.print("  Press 'ESC' to quit")
+            console.print("  Press 'F2' to toggle speech")
+            console.print("  Press 'F3' to pause/resume")
+        except Exception as e:
+            console.print(f"[yellow]Warning: Could not set up some keyboard shortcuts: {e}")
+            console.print("[yellow]Use Ctrl+C to quit if keyboard shortcuts don't work")
         
     def stop(self):
         """Stop all services and set stop flag"""
