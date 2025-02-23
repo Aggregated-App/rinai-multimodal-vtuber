@@ -4,6 +4,7 @@
 !.env.example
 
 # Virtual Environment
+myenv/
 venv/
 env/
 ENV/
