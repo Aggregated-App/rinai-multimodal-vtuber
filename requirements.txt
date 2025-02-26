@@ -57,3 +57,9 @@ google-auth-oauthlib>=1.2.1
 google-auth-httplib2>=0.2.0
 google-api-python-client>=2.161.0
 retry_requests>=0.2.0
+
+# NEAR Protocol packages
+borsh-construct==0.1.0
+base58==2.1.1
+py-ed25519==1.4.1  # Using this instead of ed25519
+near-api-py==0.1.0

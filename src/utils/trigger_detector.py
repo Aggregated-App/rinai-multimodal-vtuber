@@ -133,6 +133,59 @@ class TriggerDetector:
             ]
         }
 
+        # Define NEAR patterns with more detail
+        self.near_patterns = {
+            'general': {
+                'keywords': ['near', 'intent', 'protocol', 'crypto', 'token'],
+                'phrases': ['using intents', 'via intents', 'with intents', 'on near']
+            },
+            'swap': {
+                'keywords': ['swap', 'exchange', 'convert', 'trade'],
+                'phrases': [
+                    'swap near for', 'exchange near to', 'convert near into',
+                    'trade near for', 'swap tokens', 'exchange tokens'
+                ],
+                'approval_required': True
+            },
+            'deposit': {
+                'keywords': ['deposit', 'add', 'put'],
+                'phrases': [
+                    'deposit near', 'add near', 'put near in',
+                    'deposit tokens', 'add funds', 'deposit money'
+                ],
+                'approval_required': True
+            },
+            'withdraw': {
+                'keywords': ['withdraw', 'send', 'transfer', 'take'],
+                'phrases': [
+                    'withdraw near', 'send near to', 'transfer near',
+                    'withdraw tokens', 'send tokens', 'get my near'
+                ],
+                'approval_required': True
+            },
+            'cross_chain': {
+                'keywords': ['bridge', 'cross chain', 'across'],
+                'phrases': [
+                    'bridge near to', 'send across chains',
+                    'transfer to another chain', 'bridge tokens'
+                ],
+                'approval_required': True
+            }
+        }
+        
+        # Add NEAR Intents to tool triggers
+        self.tool_triggers['near_intents'] = {
+            'keywords': [
+                'near intent', 'swap', 'deposit', 'withdraw', 
+                'exchange', 'transfer', 'send near'
+            ],
+            'phrases': [
+                'swap using intents', 'deposit with intents',
+                'withdraw via intents', 'exchange tokens',
+                'transfer near', 'send tokens'
+            ]
+        }
+
     def should_use_tools(self, message: str) -> bool:
         """Check if message should trigger tool usage"""
         message = message.lower()
@@ -226,6 +279,11 @@ class TriggerDetector:
         if any(keyword.lower() in message for keyword in self.tool_triggers['weather']['keywords']) or \
            any(phrase.lower() in message for phrase in self.tool_triggers['weather']['phrases']):
             return "weather_tools"
+            
+        # Check NEAR Intents before crypto (since there's overlap)
+        if any(keyword.lower() in message for keyword in self.tool_triggers['near_intents']['keywords']) or \
+           any(phrase.lower() in message for phrase in self.tool_triggers['near_intents']['phrases']):
+            return "near_intents"
         
         # Check crypto triggers
         if any(keyword.lower() in message for keyword in self.tool_triggers['crypto']['keywords']) or \
@@ -243,3 +301,38 @@ class TriggerDetector:
             return "calendar_tool"
             
         return None 
+
+    def should_use_near_intents(self, message: str) -> bool:
+        """Check if message should trigger NEAR Intents"""
+        message = message.lower()
+        
+        # Check near intents triggers
+        if any(keyword.lower() in message for keyword in self.tool_triggers['near_intents']['keywords']):
+            return True
+        
+        if any(phrase.lower() in message for phrase in self.tool_triggers['near_intents']['phrases']):
+            return True
+        
+        return False
+
+    def get_near_operation_type(self, message: str) -> Optional[str]:
+        """Determine specific NEAR operation type from message"""
+        message = message.lower()
+        
+        if not self.should_use_near_intents(message):
+            return None
+        
+        # Check each operation type using patterns
+        for operation in ['swap', 'deposit', 'withdraw']:
+            if any(keyword.lower() in message for keyword in self.near_patterns[operation]['keywords']) or \
+               any(phrase.lower() in message for phrase in self.near_patterns[operation]['phrases']):
+                return operation
+            
+        # Check cross-chain operations
+        if 'cross' in message or 'chain' in message:
+            if any(word in message for word in ['swap', 'exchange']):
+                return "cross_chain_swap"
+            return "cross_chain_transfer"
+            
+        # If it's NEAR-related but not matching specific patterns, default to swap
+        return "swap" 

@@ -27,6 +27,7 @@ from src.tools.perplexity_search import PerplexityTool
 from src.tools.time_tools import TimeTool
 from src.tools.weather_tools import WeatherTool
 from src.tools.calendar_tool import CalendarTool
+from src.tools.near_intents import NearIntentsTool, NearIntentsParameters
 
 # Client imports
 from src.clients.coingecko_client import CoinGeckoClient
@@ -85,6 +86,9 @@ class Orchestrator:
         self.time_tool = TimeTool()
         self.weather_tool = WeatherTool()
         
+        # Initialize NEAR Intents tool
+        self.near_intents_tool = NearIntentsTool()
+        
         # Store tools in a dictionary for easy access
         self.tools = {
             "twitter": self.tweet_tool,
@@ -92,7 +96,8 @@ class Orchestrator:
             "perplexity_search": self.perplexity_tool,
             "time_tools": self.time_tool,
             "weather_tools": self.weather_tool,
-            "calendar_tool": self.calendar_tool
+            "calendar_tool": self.calendar_tool,
+            "near_intents": self.near_intents_tool
         }
         
     async def initialize(self):
@@ -145,7 +150,7 @@ class Orchestrator:
             if not tool_type:
                 tool_type = trigger_detector.get_specific_tool_type(command)
             
-            if tool_type in ["crypto_data", "perplexity_search", "time_tools", "weather_tools", "calendar_tool"]:
+            if tool_type in ["crypto_data", "perplexity_search", "time_tools", "weather_tools", "calendar_tool", "near_intents"]:
                 logger.info(f"Processing direct tool request: {tool_type}")
                 analysis = await self._analyze_command(command)
                 if analysis and analysis.tools_needed:
@@ -196,6 +201,54 @@ class Orchestrator:
                     return AgentResult(
                         response=self._format_response(results),
                         data=results
+                    )
+            
+            # For NEAR operations, check the operation type first
+            if tool_type == "near_intents":
+                operation_type = trigger_detector.get_near_operation_type(command)
+                logger.info(f"Processing NEAR operation: {operation_type}")
+
+                # Start operation state
+                await self.tool_state_manager.start_operation(
+                    session_id=deps.conversation_id,
+                    operation_type=operation_type,
+                    initial_data={
+                        "command": command,
+                        "status": "pending_approval",
+                        "parameters": await self._analyze_near_command(command, operation_type)
+                    }
+                )
+
+                # Return approval request
+                return AgentResult(
+                    response=f"I'll help you {operation_type} NEAR tokens. Please confirm this transaction by saying 'yes' or 'confirm'.",
+                    data={"status": "pending_approval", "operation_type": operation_type}
+                )
+            
+            # Check for pending NEAR approvals
+            if self.deps and self.deps.conversation_id:
+                operation_state = await self.tool_state_manager.get_operation_state(self.deps.conversation_id)
+                
+                if operation_state and operation_state.get("status") == "pending_approval":
+                    logger.info("Processing NEAR approval response")
+                    near_tool = self.tools.get("near_intents")
+                    if not near_tool:
+                        return AgentResult(
+                            response="NEAR tool not configured",
+                            data={"status": "error"}
+                        )
+                    
+                    # Handle approval response
+                    approval_result = await near_tool._process_near_approval_response(
+                        message=command,
+                        session_id=self.deps.conversation_id
+                    )
+                    return AgentResult(
+                        response=approval_result.get("response", ""),
+                        data={
+                            "status": approval_result.get("status"),
+                            "operation_data": approval_result.get("data", {})
+                        }
                     )
             
             # If no tool matches
@@ -269,6 +322,11 @@ class Orchestrator:
                 ]
             elif tool_type == "calendar_tool":
                 formatted_prompt = ToolPrompts.CALENDAR_TOOL.format(command=command)
+                messages = [
+                    {"role": "system", "content": formatted_prompt}
+                ]
+            elif tool_type == "near_intents":
+                formatted_prompt = ToolPrompts.NEAR_INTENTS_TOOL.format(command=command)
                 messages = [
                     {"role": "system", "content": formatted_prompt}
                 ]
@@ -401,6 +459,10 @@ class Orchestrator:
                             tasks.append(tool_instance.get_weather_data(
                                 location=tool.parameters.get("location"),
                                 units=tool.parameters.get("units", "metric")
+                            ))
+                        elif tool.tool_name == "near_intents":
+                            tasks.append(tool_instance.execute(
+                                parameters=tool.parameters
                             ))
                     else:
                         results[tool.tool_name] = {
@@ -559,3 +621,34 @@ class Orchestrator:
         except Exception as e:
             logger.warning(f"Failed to initialize Google Calendar client: {e}")
             return None
+
+    async def _analyze_near_command(self, command: str, operation_type: str) -> Dict[str, Any]:
+        """Analyze NEAR command to extract parameters"""
+        prompt = f"""Extract NEAR {operation_type} parameters from: "{command}"
+
+Available NEAR operations:
+1. swap: Exchange tokens
+   Parameters: token_in, amount_in, token_out
+2. deposit: Add tokens
+   Parameters: token_in, amount_in
+3. withdraw: Remove tokens
+   Parameters: token_in, amount_in, destination_address
+4. cross_chain: Bridge tokens
+   Parameters: token_in, amount_in, destination_chain, destination_address
+
+Return ONLY valid JSON matching format:
+{{
+    "operation": "{operation_type}",
+    "parameters": {{
+        "token_in": "NEAR",
+        "amount_in": 10.5,
+        "token_out": "USDC"  # for swap
+    }},
+    "requires_approval": true
+}}"""
+
+        response = await self.llm_service.get_response(
+            prompt=[{"role": "system", "content": prompt}],
+            model_type=ModelType.GROQ_LLAMA_3_3_70B
+        )
+        return json.loads(response)
