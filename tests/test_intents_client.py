@@ -1,3 +1,5 @@
+import pytest
+
 import os
 import sys
 from dotenv import load_dotenv
@@ -23,24 +25,28 @@ from clients.near_Intents_client.config import (
     from_decimals
 )
 
+
+#RUN THIS TEST WITH: pytest tests/test_intents_client.py
+
 # Load environment variables
 load_dotenv()
 
-def test_near_deposit_and_withdraw():
-    """Test depositing and withdrawing NEAR"""
-    # Initialize account directly
+# Simple fixture for account setup - reuses your existing initialization
+@pytest.fixture
+def account():
     account_id = os.getenv('NEAR_ACCOUNT_ID')
     private_key = os.getenv('NEAR_PRIVATE_KEY')
     provider = JsonProvider(os.getenv('NEAR_RPC_URL'))
     key_pair = KeyPair(private_key)
     signer = Signer(account_id, key_pair)
-    account = Account(provider, signer)
-    
-    print("\nTesting NEAR deposit and withdraw:")
+    return Account(provider, signer)
+
+def test_near_deposit_and_withdraw(account):
+    """Test depositing and withdrawing NEAR"""
     
     # Check initial balance
     initial_balance = get_intent_balance(account, "NEAR")
-    account_state = provider.get_account(account.account_id)
+    account_state = account.provider.get_account(account.account_id)
     print(f"Initial NEAR balance in intents: {initial_balance}")
     print(f"Initial NEAR account balance: {float(account_state['amount'])/10**24}")
     
@@ -61,7 +67,7 @@ def test_near_deposit_and_withdraw():
     
     # Check balance after deposit
     new_balance = get_intent_balance(account, "NEAR")
-    account_state = provider.get_account(account.account_id)
+    account_state = account.provider.get_account(account.account_id)
     print(f"NEAR balance after deposit: {new_balance}")
     print(f"NEAR account balance after deposit: {float(account_state['amount'])/10**24}")
     
@@ -78,17 +84,8 @@ def test_near_deposit_and_withdraw():
     final_balance = get_intent_balance(account, "NEAR")
     print(f"Final NEAR balance in intents: {final_balance}")
 
-def test_near_usdc_swap():
+def test_near_usdc_swap(account):
     """Test getting quotes and swapping NEAR to USDC"""
-    # Initialize account directly
-    account_id = os.getenv('NEAR_ACCOUNT_ID')
-    private_key = os.getenv('NEAR_PRIVATE_KEY')
-    provider = JsonProvider(os.getenv('NEAR_RPC_URL'))
-    key_pair = KeyPair(private_key)
-    signer = Signer(account_id, key_pair)
-    account = Account(provider, signer)
-    
-    print("\nTesting NEAR to USDC swap:")
     
     # Check initial balances
     near_balance = get_intent_balance(account, "NEAR")

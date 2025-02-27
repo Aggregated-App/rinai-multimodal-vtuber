@@ -123,10 +123,12 @@ def sign_quote(account, quote):
     return Commitment(standard="raw_ed25519", payload=quote, signature=signature, public_key=public_key)
 
 
-def create_token_diff_quote(account, token_in, amount_in, token_out, amount_out):
+def create_token_diff_quote(account, token_in, amount_in, token_out, amount_out, quote_asset_in=None, quote_asset_out=None):
     """Create a token diff quote for swapping"""
-    token_in_fmt = config.to_asset_id(token_in)
-    token_out_fmt = config.to_asset_id(token_out)
+    # Use exact asset IDs from quote if provided, otherwise fallback to config
+    token_in_fmt = quote_asset_in if quote_asset_in else config.to_asset_id(token_in)
+    token_out_fmt = quote_asset_out if quote_asset_out else config.to_asset_id(token_out)
+    
     if not token_in_fmt or not token_out_fmt:
         raise ValueError(f"Token {token_in} or {token_out} not supported")
         
@@ -137,7 +139,10 @@ def create_token_diff_quote(account, token_in, amount_in, token_out, amount_out)
         verifying_contract="intents.near",
         deadline=get_future_deadline(),
         intents=[
-            Intent(intent='token_diff', diff={token_in_fmt: "-" + amount_in, token_out_fmt: amount_out})
+            Intent(intent='token_diff', diff={
+                token_in_fmt: "-" + str(amount_in),  # Make amount_in negative
+                token_out_fmt: str(amount_out)  # Keep amount_out positive
+            })
         ]
     ))
     return sign_quote(account, quote)
@@ -229,20 +234,28 @@ class IntentRequest(object):
 
 def fetch_options(request):
     """Fetches the trading options from the solver bus."""
+    # Match the exact format of working curl request
     rpc_request = {
-        "id": "dontcare",
         "jsonrpc": "2.0",
+        "id": 1,  # Changed from "dontcare" to 1
         "method": "quote",
-        "params": [request.serialize()]
+        "params": [{
+            "defuse_asset_identifier_in": request.asset_in["asset"],
+            "defuse_asset_identifier_out": request.asset_out["asset"],
+            "exact_amount_in": str(request.asset_in["amount"])
+            # Removed min_deadline_ms to match working curl
+        }]
     }
-    print(f"\nSending request to solver bus:")
+    
+    print("\n=== QUOTE REQUEST ===")
     print(f"URL: {SOLVER_BUS_URL}")
     print(f"Request: {json.dumps(rpc_request, indent=2)}")
     
     try:
         response = requests.post(SOLVER_BUS_URL, json=rpc_request)
-        print(f"Response status: {response.status_code}")
-        print(f"Response body: {response.text}")
+        print("\n=== QUOTE RESPONSE ===")
+        print(f"Status: {response.status_code}")
+        print(f"Response: {json.dumps(response.json(), indent=2)}")
         
         if response.status_code != 200:
             print(f"Error from solver bus: {response.text}")
@@ -253,17 +266,15 @@ def fetch_options(request):
             print(f"RPC error: {result['error']}")
             return []
             
-        # Handle null result case
-        if result.get("result") is None:
+        # Extract quotes directly from result array
+        quotes = result.get("result", [])  # Changed from result.get("result", {}).get("quotes", [])
+        if not quotes:
             print("No quotes available for this swap")
-            return []
             
-        # Extract quotes from result
-        quotes = result.get("result", {}).get("quotes", [])
         return quotes
             
     except Exception as e:
-        print(f"Error fetching options: {str(e)}")
+        print(f"Error: {str(e)}")
         return []
 
 
@@ -302,8 +313,20 @@ def intent_swap(account, token_in, amount_in, token_out, chain_out="eth"):
     print(f"Received options: {options}")
     
     best_option = select_best_option(options)
-    amount_in_decimals = config.to_decimals(amount_in, token_in)
-    quote = create_token_diff_quote(account, token_in, amount_in_decimals, token_out, best_option['amount_out'])
+    if not best_option:
+        raise Exception("No valid quotes received")
+        
+    # Use the exact asset IDs and amounts from the quote
+    quote = create_token_diff_quote(
+        account, 
+        token_in, 
+        best_option['amount_in'],
+        token_out, 
+        best_option['amount_out'],
+        quote_asset_in=best_option['defuse_asset_identifier_in'],
+        quote_asset_out=best_option['defuse_asset_identifier_out']
+    )
+    
     signed_intent = PublishIntent(signed_data=quote, quote_hashes=[best_option['quote_hash']])
     response = publish_intent(signed_intent)
     return response
@@ -311,8 +334,8 @@ def intent_swap(account, token_in, amount_in, token_out, chain_out="eth"):
 
 def get_future_deadline(days=365):
     """Generate a deadline timestamp that's X days in the future"""
-    from datetime import datetime, timedelta
-    future_date = datetime.utcnow() + timedelta(days=days)
+    from datetime import datetime, timedelta, UTC
+    future_date = datetime.now(UTC) + timedelta(days=days)
     return future_date.strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
