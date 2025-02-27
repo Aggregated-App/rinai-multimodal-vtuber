@@ -47,8 +47,8 @@ def test_near_deposit_and_withdraw(account):
     # Check initial balance
     initial_balance = get_intent_balance(account, "NEAR")
     account_state = account.provider.get_account(account.account_id)
-    print(f"Initial NEAR balance in intents: {initial_balance}")
-    print(f"Initial NEAR account balance: {float(account_state['amount'])/10**24}")
+    print(f"Initial NEAR balance in intents account: {initial_balance}")
+    print(f"Initial NEAR balance: {float(account_state['amount'])/10**24}")
     
     # Deposit 0.1 NEAR
     deposit_amount = 0.1
@@ -68,8 +68,8 @@ def test_near_deposit_and_withdraw(account):
     # Check balance after deposit
     new_balance = get_intent_balance(account, "NEAR")
     account_state = account.provider.get_account(account.account_id)
-    print(f"NEAR balance after deposit: {new_balance}")
-    print(f"NEAR account balance after deposit: {float(account_state['amount'])/10**24}")
+    print(f"NEAR balance after deposit in Intents account: {new_balance}")
+    print(f"NEAR account balance after deposit in NEAR account: {float(account_state['amount'])/10**24}")
     
     # Withdraw 0.5 NEAR
     withdraw_amount = 0.05
@@ -81,18 +81,52 @@ def test_near_deposit_and_withdraw(account):
         print("Withdrawal failed:", str(e))
     
     # Check final balance
+    time.sleep(3)  # Add delay after withdraw
     final_balance = get_intent_balance(account, "NEAR")
     print(f"Final NEAR balance in intents: {final_balance}")
 
 def test_near_usdc_swap(account):
     """Test getting quotes and swapping NEAR to USDC"""
     
-    # Check initial balances
-    near_balance = get_intent_balance(account, "NEAR")
-    usdc_balance = get_intent_balance(account, "USDC")
-    print(f"Initial balances - NEAR: {near_balance}, USDC: {usdc_balance}")
+    def print_balances(label="Balances"):
+        """Helper function to print all balances in consistent format"""
+        # Check NEAR in intents
+        near_balance = get_intent_balance(account, "NEAR")
+        
+        # Check both USDC types
+        eth_usdc = account.view_function(
+            'intents.near',
+            'mt_balance_of',
+            {
+                'token_id': 'nep141:eth-0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.omft.near',
+                'account_id': account.account_id
+            }
+        )
+        near_usdc = account.view_function(
+            'intents.near',
+            'mt_balance_of',
+            {
+                'token_id': 'nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1',
+                'account_id': account.account_id
+            }
+        )
+        
+        eth_usdc_amount = Decimal(eth_usdc['result']) / Decimal('1000000') if eth_usdc.get('result') else Decimal('0')
+        near_usdc_amount = Decimal(near_usdc['result']) / Decimal('1000000') if near_usdc.get('result') else Decimal('0')
+        total_usdc = eth_usdc_amount + near_usdc_amount
+        
+        print(f"\n{label}:")
+        print(f"NEAR: {near_balance}")
+        print(f"ETH-USDC: {eth_usdc_amount:.6f}")
+        print(f"NEAR-USDC: {near_usdc_amount:.6f}")
+        print(f"Total USDC: {total_usdc:.6f}")
+        
+        return near_balance, total_usdc
     
-    # Get quote for 0.1 NEAR to USDC (changed from 1.0)
+    # Check initial balances
+    print_balances("Initial Balances")
+    
+    # Get quote for 0.1 NEAR to USDC
     deposit_amount = 0.1
     print(f"\nDepositing {deposit_amount} NEAR first...")
     try:
@@ -106,8 +140,8 @@ def test_near_usdc_swap(account):
         time.sleep(3)  # Wait for deposit to complete
         
         # Check balances after deposit
-        near_balance = get_intent_balance(account, "NEAR")
-        print(f"NEAR balance after deposit: {near_balance}")
+        print_balances("Balances After Deposit")
+        
     except Exception as e:
         print("Deposit failed:", str(e))
         return
@@ -116,18 +150,17 @@ def test_near_usdc_swap(account):
     amount_in = 0.1
     print(f"\nGetting quote for {amount_in} NEAR to USDC (ETH)...")
     try:
-        # Execute the swap specifying ETH chain for USDC (make sure you use correct diffues asset id)
+        # Execute the swap specifying ETH chain for USDC
         print(f"Executing swap of {amount_in} NEAR to USDC (ETH)...")
         result = intent_swap(account, "NEAR", amount_in, "USDC", chain_out="eth")
         print("Swap successful:", result)
+        time.sleep(3)  # Wait for swap to complete
+        
+        # Check final balances
+        print_balances("Final Balances")
+        
     except Exception as e:
         print("Swap failed:", str(e))
-        return
-    
-    # Check final balances
-    final_near = get_intent_balance(account, "NEAR")
-    final_usdc = get_intent_balance(account, "USDC")
-    print(f"Final balances - NEAR: {final_near}, USDC: {final_usdc}")
 
 if __name__ == "__main__":
     print("Running intents client tests...")
