@@ -11,6 +11,7 @@ import time
 import random
 import base64
 import json
+import base58
 
 # Add the src directory to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -52,6 +53,31 @@ def account():
     signer = Signer(account_id, key_pair)
     return Account(provider, signer)
 
+@pytest.fixture
+def setup_account(account):
+    """Setup account with registered public key if needed"""
+    try:
+        print("\nChecking public key registration...")
+        public_key = "ed25519:" + base58.b58encode(account.signer.public_key).decode('utf-8')
+        
+        # Check if already registered
+        result = account.view_function(
+            "intents.near",
+            "has_public_key",
+            {"public_key": public_key}
+        )
+        
+        if not result['result']:
+            print("Public key not registered, registering now...")
+            register_intent_public_key(account)
+            time.sleep(2)  # Wait for registration
+        else:
+            print("Public key already registered")
+            
+        return account
+    except Exception as e:
+        pytest.fail(f"Failed to check/register public key: {str(e)}")
+
 def test_near_deposit_and_withdraw(account):
     """Test depositing and withdrawing NEAR"""
     
@@ -82,7 +108,7 @@ def test_near_deposit_and_withdraw(account):
     print(f"NEAR balance after deposit in Intents account: {new_balance}")
     print(f"NEAR account balance after deposit in NEAR account: {from_decimals(account_state['amount'], 'NEAR')}")
     
-    # Withdraw 0.005 NEAR using new smart_withdraw
+    # Withdraw 0.005 NEAR using smart_withdraw
     withdraw_amount = 0.005
     print(f"\nWithdrawing {withdraw_amount} NEAR...")
     try:
@@ -90,7 +116,7 @@ def test_near_deposit_and_withdraw(account):
             account=account,
             token="NEAR",
             amount=withdraw_amount,
-            destination_chain="near"  # Explicitly specify NEAR chain
+            destination_chain="near"  # Optional, defaults to "near"
         )
         print("Withdrawal successful:", result)
     except Exception as e:
@@ -103,6 +129,11 @@ def test_near_deposit_and_withdraw(account):
 
 def test_near_usdc_swap(account):
     """Test getting quotes and swapping NEAR to USDC"""
+    initial_balances = {
+        "NEAR": get_intent_balance(account, "NEAR"),
+        "USDC": get_intent_balance(account, "USDC", chain="eth")  # Note: Check ETH chain USDC
+    }
+    print("\nInitial Balances:", json.dumps(initial_balances, indent=2))
     
     # Validate tokens exist before starting test
     near_token = config.get_token_by_symbol("NEAR")
@@ -125,11 +156,6 @@ def test_near_usdc_swap(account):
                 "near": near_balance
             }
         }
-    
-    # Check initial balances
-    initial_balances = get_balances()
-    print("\nInitial Balances:")
-    print(json.dumps(initial_balances, indent=2))
     
     # Deposit NEAR
     deposit_amount = 0.1
@@ -161,28 +187,24 @@ def test_near_usdc_swap(account):
         
         # Use smart_withdraw for USDC withdrawal
         try:
+            print(f"\nWithdrawing {swap_amount} USDC to NEAR wallet...")
             withdrawal_result = smart_withdraw(
                 account=account,
                 token="USDC",
                 amount=swap_amount,
-                source_chain="eth",      # Specify source chain where USDC exists
-                destination_chain="near"  # Convert and withdraw to NEAR chain
+                destination_chain="near",        # Token lives on ETH chain
+                destination_address=account.account_id  # But send to NEAR wallet
             )
-            print("\nWithdrawal to NEAR Result:")
+            print("\nWithdrawal Result:")
             print(json.dumps(withdrawal_result, indent=2))
             time.sleep(3)
             
-            # Check final balances after withdrawal
-            final_balances = get_balances()
-            print("\nFinal Balances After NEAR Withdrawal:")
-            print(json.dumps(final_balances, indent=2))
+            final_balance = get_intent_balance(account, "USDC", chain="eth")
+            print(f"\nFinal USDC balance on ETH chain: {final_balance}")
             
         except Exception as e:
-            print("\nNEAR Withdrawal Error:")
-            print(f"Error Type: {type(e).__name__}")
-            print(f"Error Message: {str(e)}")
-            print("\nCurrent Balances:")
-            get_balances()
+            print(f"\nWithdrawal Error: {str(e)}")
+            print(f"Current USDC balance on ETH chain: {get_intent_balance(account, 'USDC', chain='eth')}")
         
     except Exception as e:
         print("Swap failed:", str(e))
@@ -204,23 +226,15 @@ def test_near_usdc_swap(account):
 
 def test_near_sol_swap(account):
     """Test swapping NEAR to SOL and withdrawing to Solana wallet"""
-    
     def get_balances():
         """Get NEAR and SOL balances"""
-        sol_balance = get_intent_balance(account, "SOL", chain="solana")
-        near_balance = get_intent_balance(account, "NEAR")
-        print(f"\nDetailed Balances:")
-        print(f"SOL Balance: {sol_balance}")
-        print(f"NEAR Balance: {near_balance}")
         return {
-            "NEAR": near_balance,
-            "SOL": sol_balance
+            "NEAR": get_intent_balance(account, "NEAR"),
+            "SOL": get_intent_balance(account, "SOL", chain="solana")
         }
-    
-    # Check initial balances
+
     initial_balances = get_balances()
-    print("\nInitial Balances:")
-    print(json.dumps(initial_balances, indent=2))
+    print("\nInitial Balances:", json.dumps(initial_balances, indent=2))
     
     # Deposit NEAR
     deposit_amount = 0.4
@@ -236,6 +250,7 @@ def test_near_sol_swap(account):
     
     # Execute swap
     try:
+        print("\nExecuting NEAR to SOL swap...")
         swap_result = intent_swap(account, "NEAR", deposit_amount, "SOL", chain_out="solana")
         print("\nSwap Result Details:")
         print(json.dumps(swap_result, indent=2))
@@ -244,6 +259,7 @@ def test_near_sol_swap(account):
         # Get post-swap balances
         print("\nBalances After Swap:")
         post_swap_balances = get_balances()
+        print(json.dumps(post_swap_balances, indent=2))
         
         # Use config's decimal conversion
         swap_amount = config.from_decimals(swap_result['amount_out'], 'SOL')
@@ -252,28 +268,25 @@ def test_near_sol_swap(account):
         
         # Use smart_withdraw for SOL withdrawal to Solana wallet
         try:
+            print(f"\nWithdrawing {swap_amount} SOL to Solana wallet...")
             withdrawal_result = smart_withdraw(
                 account=account,
                 token="SOL",
                 amount=swap_amount,
-                source_chain="solana",    # SOL exists on Solana chain
-                destination_chain="solana" # Withdraw to Solana chain
+                destination_chain="solana",     # Token lives on Solana chain
+                destination_address=os.getenv('SOLANA_ACCOUNT_ID')  # Send to Solana wallet
             )
-            print("\nWithdrawal to Solana Result:")
+            print("\nWithdrawal Result:")
             print(json.dumps(withdrawal_result, indent=2))
             time.sleep(3)
             
-            # Check final balances after withdrawal
             final_balances = get_balances()
-            print("\nFinal Balances After Solana Withdrawal:")
+            print("\nFinal Balances:")
             print(json.dumps(final_balances, indent=2))
             
         except Exception as e:
-            print("\nSolana Withdrawal Error:")
-            print(f"Error Type: {type(e).__name__}")
-            print(f"Error Message: {str(e)}")
-            print("\nCurrent Balances:")
-            get_balances()
+            print(f"\nWithdrawal Error: {str(e)}")
+            print(f"Current SOL balance: {get_intent_balance(account, 'SOL', chain='solana')}")
         
     except Exception as e:
         print("Swap failed:", str(e))
