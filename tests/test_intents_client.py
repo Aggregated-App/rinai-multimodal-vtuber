@@ -8,6 +8,9 @@ from near_api.signer import KeyPair, Signer
 from near_api.providers import JsonProvider
 from decimal import Decimal
 import time
+import random
+import base64
+import json
 
 # Add the src directory to the Python path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -16,13 +19,21 @@ from clients.near_Intents_client.intents_client import (
     intent_withdraw,
     intent_swap,
     get_intent_balance,
-    wrap_near
+    wrap_near,
+    publish_intent,
+    Quote,
+    Intent,
+    PublishIntent,
+    get_future_deadline,
+    sign_quote,
+    MAX_GAS,
+    withdraw_from_intents,
+    withdraw_from_chain_to_near
 )
 from clients.near_Intents_client.config import (
     get_token_by_symbol,
-    to_asset_id,
-    to_decimals,
-    from_decimals
+    get_defuse_asset_id,
+    to_decimals
 )
 
 
@@ -88,79 +99,91 @@ def test_near_deposit_and_withdraw(account):
 def test_near_usdc_swap(account):
     """Test getting quotes and swapping NEAR to USDC"""
     
-    def print_balances(label="Balances"):
-        """Helper function to print all balances in consistent format"""
-        # Check NEAR in intents
-        near_balance = get_intent_balance(account, "NEAR")
-        
-        # Check both USDC types
-        eth_usdc = account.view_function(
-            'intents.near',
-            'mt_balance_of',
-            {
-                'token_id': 'nep141:eth-0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.omft.near',
-                'account_id': account.account_id
-            }
-        )
-        near_usdc = account.view_function(
-            'intents.near',
-            'mt_balance_of',
-            {
-                'token_id': 'nep141:17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1',
-                'account_id': account.account_id
-            }
-        )
-        
-        eth_usdc_amount = Decimal(eth_usdc['result']) / Decimal('1000000') if eth_usdc.get('result') else Decimal('0')
-        near_usdc_amount = Decimal(near_usdc['result']) / Decimal('1000000') if near_usdc.get('result') else Decimal('0')
-        total_usdc = eth_usdc_amount + near_usdc_amount
-        
-        print(f"\n{label}:")
-        print(f"NEAR: {near_balance}")
-        print(f"ETH-USDC: {eth_usdc_amount:.6f}")
-        print(f"NEAR-USDC: {near_usdc_amount:.6f}")
-        print(f"Total USDC: {total_usdc:.6f}")
-        
-        return near_balance, total_usdc
+    def get_balances():
+        """Get NEAR and USDC balances"""
+        eth_balance = get_intent_balance(account, "USDC", chain="eth")
+        near_balance = get_intent_balance(account, "USDC", chain="near")
+        print(f"\nDetailed USDC Balances:")
+        print(f"ETH Chain: {eth_balance}")
+        print(f"NEAR Chain: {near_balance}")
+        return {
+            "NEAR": get_intent_balance(account, "NEAR"),
+            "USDC": eth_balance
+        }
     
     # Check initial balances
-    print_balances("Initial Balances")
+    initial_balances = get_balances()
+    print("\nInitial Balances:")
+    print(json.dumps(initial_balances, indent=2))
     
-    # Get quote for 0.1 NEAR to USDC
+    # Deposit NEAR
     deposit_amount = 0.1
-    print(f"\nDepositing {deposit_amount} NEAR first...")
+    print(f"\nDepositing {deposit_amount} NEAR...")
     try:
-        # First wrap the NEAR
         wrap_result = wrap_near(account, deposit_amount)
-        time.sleep(3)  # Wait for wrap to complete
-        
-        # Then deposit the wrapped NEAR
+        time.sleep(3)
         result = intent_deposit(account, "NEAR", deposit_amount)
         print("Deposit successful:", result)
-        time.sleep(3)  # Wait for deposit to complete
-        
-        # Check balances after deposit
-        print_balances("Balances After Deposit")
-        
     except Exception as e:
         print("Deposit failed:", str(e))
         return
     
-    # Now try the swap with 0.1 NEAR
-    amount_in = 0.1
-    print(f"\nGetting quote for {amount_in} NEAR to USDC (ETH)...")
+    # Execute swap
     try:
-        # Execute the swap specifying ETH chain for USDC
-        print(f"Executing swap of {amount_in} NEAR to USDC (ETH)...")
-        result = intent_swap(account, "NEAR", amount_in, "USDC", chain_out="eth")
-        print("Swap successful:", result)
-        time.sleep(3)  # Wait for swap to complete
+        swap_result = intent_swap(account, "NEAR", deposit_amount, "USDC", chain_out="eth")
+        print("\nSwap Result Details:")
+        print(json.dumps(swap_result, indent=2))
+        time.sleep(3)
         
-        # Check final balances
-        print_balances("Final Balances")
+        # Get post-swap balances
+        print("\nBalances After Swap:")
+        post_swap_balances = get_balances()
+        
+        swap_amount = float(swap_result['amount_out']) / (10**6)
+        print(f"\nAttempting to withdraw {swap_amount} USDC")
+        print(f"Current ETH-USDC balance: {post_swap_balances['USDC']}")
+        
+        # Add withdrawal to NEAR chain
+        try:
+            withdrawal_result = withdraw_from_chain_to_near(
+                account=account,
+                token="USDC",
+                amount=swap_amount,
+                source_chain="eth"
+            )
+            print("\nWithdrawal to NEAR Result:")
+            print(json.dumps(withdrawal_result, indent=2))
+            time.sleep(3)
+            
+            # Check final balances after withdrawal
+            final_balances = get_balances()
+            print("\nFinal Balances After NEAR Withdrawal:")
+            print(json.dumps(final_balances, indent=2))
+            
+        except Exception as e:
+            print("\nNEAR Withdrawal Error:")
+            print(f"Error Type: {type(e).__name__}")
+            print(f"Error Message: {str(e)}")
+            print("\nCurrent Balances:")
+            get_balances()
         
     except Exception as e:
         print("Swap failed:", str(e))
+        return
+    
+    # Check final balances
+    post_withdrawal = get_balances()
+    print("\nPost-Withdrawal Balances:")
+    print(f"NEAR: {post_withdrawal['NEAR']}")
+    print(f"USDC: {post_withdrawal['USDC']}")
+    
+    return {
+        "initial_balances": initial_balances,
+        "final_balances": post_withdrawal,
+        "post_withdrawal": post_withdrawal,
+        "amount_swapped": deposit_amount,
+        "amount_received": swap_amount
+    }
 
 if __name__ == "__main__":
     print("Running intents client tests...")

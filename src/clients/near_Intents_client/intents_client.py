@@ -14,16 +14,18 @@ from clients.near_Intents_client.config import (
     to_decimals,
     from_decimals,
     get_token_by_symbol,
-    get_omft_address
+    get_omft_address,
+    get_defuse_asset_id
 )
 from dotenv import load_dotenv
+import time
 
 load_dotenv()
 
 MAX_GAS = 300 * 10 ** 12
 SOLVER_BUS_URL = os.getenv('SOLVER_BUS_URL', "https://solver-relay-v2.chaindefuser.com/rpc")
 
-ASSET_MAP = {
+TOKENS = {
     'USDC': { 
         'token_id': '17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1',
         'omft': 'eth-0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48.omft.near',
@@ -299,37 +301,46 @@ def select_best_option(options):
     return best_option
 
 
-def intent_swap(account, token_in, amount_in, token_out, chain_out="eth"):
-    """Swap tokens using intents"""
-    print(f"\nCreating swap request:")
-    print(f"Token in: {token_in}")
-    print(f"Amount in: {amount_in}")
-    print(f"Token out: {token_out} on {chain_out}")
+def to_base_units(human_amount: float, token: str) -> str:
+    """Convert human readable amount to base units as string"""
+    decimals = TOKENS[token]['decimals']
+    return str(int(human_amount * 10 ** decimals))
+
+
+def intent_swap(account, token_in: str, amount_in: float, token_out: str, chain_out: str = "eth") -> dict:
+    """Execute a token swap using intents."""
+    amount_in_base = to_base_units(amount_in, token_in)
     
+    # Get quote from solver
     request = IntentRequest().asset_in(token_in, amount_in).asset_out(token_out, chain=chain_out)
-    print(f"Serialized request: {request.serialize()}")
-    
     options = fetch_options(request)
-    print(f"Received options: {options}")
-    
     best_option = select_best_option(options)
+    
     if not best_option:
         raise Exception("No valid quotes received")
-        
-    # Use the exact asset IDs and amounts from the quote
+    
+    # Create quote using base units
     quote = create_token_diff_quote(
-        account, 
-        token_in, 
-        best_option['amount_in'],
-        token_out, 
+        account,
+        token_in,
+        amount_in_base,
+        token_out,
         best_option['amount_out'],
         quote_asset_in=best_option['defuse_asset_identifier_in'],
         quote_asset_out=best_option['defuse_asset_identifier_out']
     )
     
-    signed_intent = PublishIntent(signed_data=quote, quote_hashes=[best_option['quote_hash']])
-    response = publish_intent(signed_intent)
-    return response
+    # Submit intent
+    signed_intent = PublishIntent(
+        signed_data=quote,
+        quote_hashes=[best_option['quote_hash']]
+    )
+    
+    # Return both the swap result and the amount_out
+    return {
+        **publish_intent(signed_intent),
+        'amount_out': best_option['amount_out']  # Include the amount from quote
+    }
 
 
 def get_future_deadline(days=365):
@@ -349,93 +360,177 @@ def intent_withdraw(account, destination_address, token, amount, network='near')
         amount: Amount to withdraw
         network: Target chain (default: 'near')
     """
-    nonce = base64.b64encode(random.getrandbits(256).to_bytes(32, byteorder='big')).decode('utf-8')
-    
-    # Get token configuration
     token_config = get_token_by_symbol(token, network)
     if not token_config:
         raise ValueError(f"Token {token} not supported on network {network}")
-
-    # Prepare quote
+        
+    # Get the correct token ID based on network
+    if network == "eth":
+        token_id = token_config["chains"]["eth"]["omft"]
+        receiver_id = token_id  # For ETH tokens, receiver is the token contract
+    else:
+        token_id = token_config["chains"]["near"]["token_id"]
+        receiver_id = destination_address
+        
+    amount_base = to_decimals(amount, token)
+    
     quote = Quote(
         signer_id=account.account_id,
-        nonce=nonce,
+        nonce=base64.b64encode(random.getrandbits(256).to_bytes(32, byteorder='big')).decode('utf-8'),
         verifying_contract="intents.near",
         deadline=get_future_deadline(),
-        intents=[
-            {
-                "intent": "ft_withdraw",
-                "token": token_config["chains"]["near"]["token_id"],
-                "receiver_id": destination_address,
-                "amount": to_decimals(amount, token)
-            }
-        ]
+        intents=[{
+            "intent": "ft_withdraw",
+            "token": token_id,
+            "receiver_id": receiver_id,
+            "memo": f"WITHDRAW_TO:{destination_address}" if network == "eth" else None,
+            "amount": amount_base
+        }]
     )
-
+    
     signed_quote = sign_quote(account, json.dumps(quote))
     signed_intent = PublishIntent(signed_data=signed_quote)
     return publish_intent(signed_intent)
 
 #get intent balance
-def get_intent_balance(account, token):
+def get_intent_balance(account, token, chain="near"):
     """
     Get the balance of a specific token in the intents contract for an account
     Args:
         account: NEAR account
         token: Token symbol (e.g., 'USDC', 'NEAR', 'ETH')
+        chain: Chain name (e.g., 'near', 'eth') - defaults to 'near'
     Returns:
         float: The balance in human-readable format
     """
-    token_id = get_token_id(token)
-    print(f"Checking balance for token: {token}")
-    print(f"Token ID: {token_id}")
+    # Get the defuse asset ID for the specific chain
+    nep141_token_id = get_defuse_asset_id(token, chain)
     
-    # Convert to nep141 format as seen in the event logs
-    nep141_token_id = f"nep141:{token_id}"
-    print(f"NEP141 Token ID: {nep141_token_id}")
-    print(f"Account ID: {account.account_id}")
+    if not nep141_token_id:
+        raise ValueError(f"Token {token} not supported on chain {chain}")
     
-    if not token_id:
-        raise ValueError(f"Token {token} not supported")
-    
-    # Call the mt_balance_of view method on intents contract
     try:
         balance_response = account.view_function(
-            'intents.near',  # Call intents contract
-            'mt_balance_of',   # Use mt_balance_of method
+            'intents.near',
+            'mt_balance_of',
             {
-                'token_id': nep141_token_id,  # Use the NEP141 format
-                'account_id': account.account_id  # Get OUR balance
+                'token_id': nep141_token_id,
+                'account_id': account.account_id
             }
         )
-        print(f"Raw balance response: {balance_response}")
         
-        # Convert from base units to human readable
         if balance_response and 'result' in balance_response:
-            human_balance = from_decimals(balance_response['result'], token)
-            print(f"Converted balance: {human_balance}")
-            return human_balance
+            token_info = get_token_by_symbol(token)
+            decimals = token_info['decimals'] if token_info else 6
+            return float(balance_response['result']) / (10 ** decimals)
     except Exception as e:
         print(f"Error getting balance: {str(e)}")
     return 0.0
 
-def get_all_intent_balances(account):
-    """
-    Get all token balances in the intents contract for an account
+
+def withdraw_from_intents(account, token, amount=None, destination_chain="eth"):
+    """Universal withdrawal function that keeps tokens on their original chain
     Args:
         account: NEAR account
-    Returns:
-        dict: Dictionary of token symbols to balances
+        token: Token symbol (e.g., 'USDC', 'NEAR')
+        amount: Amount to withdraw
+        destination_chain: Target chain (default: 'eth' to prevent auto-conversion)
     """
-    balances = {}
-    for token in config.get_supported_tokens(chain='near'):
-        try:
-            balance = get_intent_balance(account, token['symbol'])
-            if balance > 0:
-                balances[token['symbol']] = balance
-        except Exception as e:
-            print(f"Error getting balance for {token['symbol']}: {str(e)}")
-    return balances
+    if amount is None:
+        raise ValueError("Amount must be specified for withdrawal")
+        
+    print(f"\nWithdrawing {amount} {token} on {destination_chain} chain")
+    
+    # Log current balances
+    eth_balance = get_intent_balance(account, token, chain="eth")
+    near_balance = get_intent_balance(account, token, chain="near")
+    print(f"Pre-withdrawal balances:")
+    print(f"ETH Chain: {eth_balance} {token}")
+    print(f"NEAR Chain: {near_balance} {token}")
+    
+    # Simple withdrawal without conversion
+    result = intent_withdraw(
+        account=account,
+        destination_address=account.account_id,
+        token=token,
+        amount=amount,
+        network=destination_chain  # Keep it on the same chain
+    )
+    
+    time.sleep(3)  # Wait for transaction
+    
+    # Log final balances
+    eth_balance = get_intent_balance(account, token, chain="eth")
+    near_balance = get_intent_balance(account, token, chain="near")
+    print(f"\nPost-withdrawal balances:")
+    print(f"ETH Chain: {eth_balance} {token}")
+    print(f"NEAR Chain: {near_balance} {token}")
+    
+    return result
+
+
+def withdraw_from_chain_to_near(account, token: str, amount: float, source_chain: str = "eth"):
+    """
+    Universal method to withdraw any token from any chain to NEAR
+    Args:
+        account: NEAR account
+        token: Token symbol (e.g., 'USDC', 'ETH', 'AURORA')
+        amount: Amount to withdraw
+        source_chain: Source chain (e.g., 'eth', 'solana', 'arbitrum')
+    """
+    # 1. Validate token and get asset IDs
+    source_asset_id = config.get_defuse_asset_id(token, source_chain)
+    near_asset_id = config.get_defuse_asset_id(token, "near")
+    
+    if not source_asset_id or not near_asset_id:
+        raise ValueError(f"Token {token} not supported on {source_chain} or NEAR chain")
+    
+    # 2. Get quote for conversion
+    request = IntentRequest()
+    request.asset_in(token, amount, chain=source_chain)
+    request.asset_out(token, chain="near")
+    
+    options = fetch_options(request)
+    best_option = select_best_option(options)
+    
+    if not best_option:
+        raise Exception(f"No valid quotes received for {token} conversion")
+    
+    # 3. Create intent message with both conversion and withdrawal
+    amount_base = config.to_decimals(amount, token)
+    quote = Quote(
+        signer_id=account.account_id,
+        nonce=base64.b64encode(random.getrandbits(256).to_bytes(32, byteorder='big')).decode('utf-8'),
+        verifying_contract="intents.near",
+        deadline=get_future_deadline(),
+        intents=[
+            # Convert from source chain to NEAR chain
+            {
+                "intent": "token_diff",
+                "diff": {
+                    source_asset_id: f"-{amount_base}",
+                    near_asset_id: best_option['amount_out']
+                },
+                "referral": "near-intents.intents-referral.near"
+            },
+            # Withdraw to NEAR wallet
+            {
+                "intent": "ft_withdraw",
+                "token": config.get_token_id(token, "near"),
+                "receiver_id": account.account_id,
+                "amount": best_option['amount_out']
+            }
+        ]
+    )
+    
+    # 4. Sign and publish with solver quote
+    signed_quote = sign_quote(account, json.dumps(quote))
+    signed_intent = PublishIntent(
+        signed_data=signed_quote,
+        quote_hashes=[best_option['quote_hash']]
+    )
+    
+    return publish_intent(signed_intent)
 
 
 if __name__ == "__main__":
