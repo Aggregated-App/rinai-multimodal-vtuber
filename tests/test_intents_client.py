@@ -16,7 +16,7 @@ import json
 sys.path.append(os.path.join(os.path.dirname(__file__), '..', 'src'))
 from clients.near_Intents_client.intents_client import (
     intent_deposit, 
-    intent_withdraw,
+    smart_withdraw,
     intent_swap,
     get_intent_balance,
     wrap_near,
@@ -26,14 +26,14 @@ from clients.near_Intents_client.intents_client import (
     PublishIntent,
     get_future_deadline,
     sign_quote,
-    MAX_GAS,
-    withdraw_from_intents,
-    withdraw_from_chain_to_near
+    MAX_GAS
 )
+from clients.near_Intents_client import config  # Import the config module
 from clients.near_Intents_client.config import (
     get_token_by_symbol,
     get_defuse_asset_id,
-    to_decimals
+    to_decimals,
+    from_decimals
 )
 
 
@@ -59,15 +59,15 @@ def test_near_deposit_and_withdraw(account):
     initial_balance = get_intent_balance(account, "NEAR")
     account_state = account.provider.get_account(account.account_id)
     print(f"Initial NEAR balance in intents account: {initial_balance}")
-    print(f"Initial NEAR balance: {float(account_state['amount'])/10**24}")
+    print(f"Initial NEAR balance: {from_decimals(account_state['amount'], 'NEAR')}")
     
-    # Deposit 0.1 NEAR
-    deposit_amount = 0.1
+    # Deposit 0.01 NEAR
+    deposit_amount = 0.01
     print(f"\nDepositing {deposit_amount} NEAR...")
     try:
         # First wrap the NEAR
         wrap_result = wrap_near(account, deposit_amount)
-        time.sleep(3)  # Back to using sleep since wait_for_transaction isn't available
+        time.sleep(3)
         
         # Then deposit
         result = intent_deposit(account, "NEAR", deposit_amount)
@@ -80,24 +80,36 @@ def test_near_deposit_and_withdraw(account):
     new_balance = get_intent_balance(account, "NEAR")
     account_state = account.provider.get_account(account.account_id)
     print(f"NEAR balance after deposit in Intents account: {new_balance}")
-    print(f"NEAR account balance after deposit in NEAR account: {float(account_state['amount'])/10**24}")
+    print(f"NEAR account balance after deposit in NEAR account: {from_decimals(account_state['amount'], 'NEAR')}")
     
-    # Withdraw 0.5 NEAR
-    withdraw_amount = 0.05
+    # Withdraw 0.005 NEAR using new smart_withdraw
+    withdraw_amount = 0.005
     print(f"\nWithdrawing {withdraw_amount} NEAR...")
     try:
-        result = intent_withdraw(account, account.account_id, "NEAR", withdraw_amount)
+        result = smart_withdraw(
+            account=account,
+            token="NEAR",
+            amount=withdraw_amount,
+            destination_chain="near"  # Explicitly specify NEAR chain
+        )
         print("Withdrawal successful:", result)
     except Exception as e:
         print("Withdrawal failed:", str(e))
     
     # Check final balance
-    time.sleep(3)  # Add delay after withdraw
+    time.sleep(3)
     final_balance = get_intent_balance(account, "NEAR")
     print(f"Final NEAR balance in intents: {final_balance}")
 
 def test_near_usdc_swap(account):
     """Test getting quotes and swapping NEAR to USDC"""
+    
+    # Validate tokens exist before starting test
+    near_token = config.get_token_by_symbol("NEAR")
+    usdc_token = config.get_token_by_symbol("USDC", "eth")
+    
+    if not near_token or not usdc_token:
+        pytest.skip("Required tokens not configured")
     
     def get_balances():
         """Get NEAR and USDC balances"""
@@ -108,7 +120,10 @@ def test_near_usdc_swap(account):
         print(f"NEAR Chain: {near_balance}")
         return {
             "NEAR": get_intent_balance(account, "NEAR"),
-            "USDC": eth_balance
+            "USDC": {
+                "eth": eth_balance,
+                "near": near_balance
+            }
         }
     
     # Check initial balances
@@ -139,17 +154,19 @@ def test_near_usdc_swap(account):
         print("\nBalances After Swap:")
         post_swap_balances = get_balances()
         
-        swap_amount = float(swap_result['amount_out']) / (10**6)
+        # Use config's decimal conversion instead of hardcoded 6
+        swap_amount = config.from_decimals(swap_result['amount_out'], 'USDC')
         print(f"\nAttempting to withdraw {swap_amount} USDC")
-        print(f"Current ETH-USDC balance: {post_swap_balances['USDC']}")
+        print(f"Current ETH-USDC balance: {post_swap_balances['USDC']['eth']}")
         
-        # Add withdrawal to NEAR chain
+        # Use smart_withdraw for USDC withdrawal
         try:
-            withdrawal_result = withdraw_from_chain_to_near(
+            withdrawal_result = smart_withdraw(
                 account=account,
                 token="USDC",
                 amount=swap_amount,
-                source_chain="eth"
+                source_chain="eth",      # Specify source chain where USDC exists
+                destination_chain="near"  # Convert and withdraw to NEAR chain
             )
             print("\nWithdrawal to NEAR Result:")
             print(json.dumps(withdrawal_result, indent=2))
@@ -185,7 +202,92 @@ def test_near_usdc_swap(account):
         "amount_received": swap_amount
     }
 
+def test_near_sol_swap(account):
+    """Test swapping NEAR to SOL and withdrawing to Solana wallet"""
+    
+    def get_balances():
+        """Get NEAR and SOL balances"""
+        sol_balance = get_intent_balance(account, "SOL", chain="solana")
+        near_balance = get_intent_balance(account, "NEAR")
+        print(f"\nDetailed Balances:")
+        print(f"SOL Balance: {sol_balance}")
+        print(f"NEAR Balance: {near_balance}")
+        return {
+            "NEAR": near_balance,
+            "SOL": sol_balance
+        }
+    
+    # Check initial balances
+    initial_balances = get_balances()
+    print("\nInitial Balances:")
+    print(json.dumps(initial_balances, indent=2))
+    
+    # Deposit NEAR
+    deposit_amount = 0.4
+    print(f"\nDepositing {deposit_amount} NEAR...")
+    try:
+        wrap_result = wrap_near(account, deposit_amount)
+        time.sleep(3)
+        result = intent_deposit(account, "NEAR", deposit_amount)
+        print("Deposit successful:", result)
+    except Exception as e:
+        print("Deposit failed:", str(e))
+        return
+    
+    # Execute swap
+    try:
+        swap_result = intent_swap(account, "NEAR", deposit_amount, "SOL", chain_out="solana")
+        print("\nSwap Result Details:")
+        print(json.dumps(swap_result, indent=2))
+        time.sleep(3)
+        
+        # Get post-swap balances
+        print("\nBalances After Swap:")
+        post_swap_balances = get_balances()
+        
+        # Use config's decimal conversion
+        swap_amount = config.from_decimals(swap_result['amount_out'], 'SOL')
+        print(f"\nAttempting to withdraw {swap_amount} SOL")
+        print(f"Current SOL balance: {post_swap_balances['SOL']}")
+        
+        # Use smart_withdraw for SOL withdrawal to Solana wallet
+        try:
+            withdrawal_result = smart_withdraw(
+                account=account,
+                token="SOL",
+                amount=swap_amount,
+                source_chain="solana",    # SOL exists on Solana chain
+                destination_chain="solana" # Withdraw to Solana chain
+            )
+            print("\nWithdrawal to Solana Result:")
+            print(json.dumps(withdrawal_result, indent=2))
+            time.sleep(3)
+            
+            # Check final balances after withdrawal
+            final_balances = get_balances()
+            print("\nFinal Balances After Solana Withdrawal:")
+            print(json.dumps(final_balances, indent=2))
+            
+        except Exception as e:
+            print("\nSolana Withdrawal Error:")
+            print(f"Error Type: {type(e).__name__}")
+            print(f"Error Message: {str(e)}")
+            print("\nCurrent Balances:")
+            get_balances()
+        
+    except Exception as e:
+        print("Swap failed:", str(e))
+        return
+    
+    return {
+        "initial_balances": initial_balances,
+        "final_balances": final_balances,
+        "amount_swapped": deposit_amount,
+        "amount_received": swap_amount
+    }
+
 if __name__ == "__main__":
     print("Running intents client tests...")
     test_near_deposit_and_withdraw()
     test_near_usdc_swap()
+    test_near_sol_swap()
