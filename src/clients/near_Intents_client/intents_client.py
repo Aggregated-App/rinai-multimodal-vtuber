@@ -19,12 +19,15 @@ from clients.near_Intents_client.config import (
 )
 from dotenv import load_dotenv
 import time
+import logging
 
 load_dotenv()
 
 MAX_GAS = 300 * 10 ** 12
 SOLVER_BUS_URL = os.getenv('SOLVER_BUS_URL', "https://solver-relay-v2.chaindefuser.com/rpc")
 
+# Configure logger
+logger = logging.getLogger(__name__)
 
 class Intent(TypedDict):
     intent: str
@@ -97,7 +100,7 @@ def register_token_storage(account, token, other_account=None):
         
     balance = account.view_function(token_id, 'storage_balance_of', {'account_id': account_id})['result']
     if not balance:
-        print('Register %s for %s storage' % (account_id, token))
+        logger.info('Register %s for %s storage' % (account_id, token))
         account.function_call(token_id, 'storage_deposit',
             {"account_id": account_id}, MAX_GAS, 1250000000000000000000)
 
@@ -159,7 +162,32 @@ def wrap_near(account, amount):
             int(amount_base)
         )
     except Exception as e:
-        print(f"Error wrapping NEAR: {str(e)}")
+        logger.error(f"Error wrapping NEAR: {str(e)}")
+        raise e
+
+
+def unwrap_near(account, amount):
+    """
+    Unwrap wNEAR back to NEAR
+    Args:
+        account: NEAR account
+        amount: Amount of wNEAR to unwrap
+    """
+    try:
+        # Use config's decimal conversion
+        amount_base = config.to_decimals(amount, "NEAR")
+        if not amount_base:
+            raise ValueError("Invalid NEAR amount")
+            
+        return account.function_call(
+            'wrap.near',
+            'near_withdraw',
+            {},
+            MAX_GAS,
+            int(amount_base)
+        )
+    except Exception as e:
+        logger.error(f"Error unwrapping NEAR: {str(e)}")
         raise e
 
 
@@ -229,47 +257,36 @@ class IntentRequest(object):
 
 def fetch_options(request):
     """Fetches the trading options from the solver bus."""
-    # Match the exact format of working curl request
     rpc_request = {
         "jsonrpc": "2.0",
-        "id": 1,  # Changed from "dontcare" to 1
+        "id": 1,
         "method": "quote",
         "params": [{
             "defuse_asset_identifier_in": request.asset_in["asset"],
             "defuse_asset_identifier_out": request.asset_out["asset"],
             "exact_amount_in": str(request.asset_in["amount"])
-            # Removed min_deadline_ms to match working curl
         }]
     }
     
-    print("\n=== QUOTE REQUEST ===")
-    print(f"URL: {SOLVER_BUS_URL}")
-    print(f"Request: {json.dumps(rpc_request, indent=2)}")
-    
     try:
         response = requests.post(SOLVER_BUS_URL, json=rpc_request)
-        print("\n=== QUOTE RESPONSE ===")
-        print(f"Status: {response.status_code}")
-        print(f"Response: {json.dumps(response.json(), indent=2)}")
-        
         if response.status_code != 200:
-            print(f"Error from solver bus: {response.text}")
+            logger.error(f"Error from solver bus: {response.text}")
             return []
             
         result = response.json()
         if "error" in result:
-            print(f"RPC error: {result['error']}")
+            logger.error(f"RPC error: {result['error']}")
             return []
             
-        # Extract quotes directly from result array
-        quotes = result.get("result", [])  # Changed from result.get("result", {}).get("quotes", [])
+        quotes = result.get("result", [])
         if not quotes:
-            print("No quotes available for this swap")
+            logger.info("No quotes available for this swap")
             
         return quotes
             
     except Exception as e:
-        print(f"Error: {str(e)}")
+        logger.error(f"Error fetching quotes: {str(e)}")
         return []
 
 
@@ -374,7 +391,7 @@ def get_intent_balance(account, token, chain="near"):
             decimals = token_info['decimals'] if token_info else 6
             return float(balance_response['result']) / (10 ** decimals)
     except Exception as e:
-        print(f"Error getting balance: {str(e)}")
+        logger.error(f"Error getting balance: {str(e)}")
     return 0.0
 
 
@@ -425,7 +442,7 @@ def withdraw_same_chain(account, token: str, amount: float, destination_address:
     near_chain_asset = config.get_defuse_asset_id(token, "near")
     
     if current_chain_asset != near_chain_asset and source_chain != "near":
-        print(f"\nConverting {token} from {source_chain} to NEAR chain...")
+        logger.info(f"\nConverting {token} from {source_chain} to NEAR chain...")
         # Need conversion quote first
         request = IntentRequest().asset_in(token, amount, chain=source_chain).asset_out(token, chain="near")
         options = fetch_options(request)
@@ -452,8 +469,8 @@ def withdraw_same_chain(account, token: str, amount: float, destination_address:
         )
         
         conversion_result = publish_intent(conversion_intent)
-        print("\nConversion Result:")
-        print(json.dumps(conversion_result, indent=2))
+        logger.info("\nConversion Result:")
+        logger.info(json.dumps(conversion_result, indent=2))
         
         # Use converted amount for withdrawal
         amount_base = best_option['amount_out']
@@ -506,11 +523,11 @@ def withdraw_cross_chain(account, token: str, amount: float, destination_chain: 
     # Remove 'nep141:' prefix to get the token ID
     token_id = defuse_asset_id.replace('nep141:', '')
     
-    print(f"\nWithdrawal Details:")
-    print(f"Token: {token}")
-    print(f"Chain: {destination_chain}")
-    print(f"Token ID: {token_id}")
-    print(f"Destination: {destination_address}")
+    logger.info(f"\nWithdrawal Details:")
+    logger.info(f"Token: {token}")
+    logger.info(f"Chain: {destination_chain}")
+    logger.info(f"Token ID: {token_id}")
+    logger.info(f"Destination: {destination_address}")
     
     amount_base = config.to_decimals(amount, token)
     
@@ -531,6 +548,26 @@ def withdraw_cross_chain(account, token: str, amount: float, destination_chain: 
     signed_quote = sign_quote(account, json.dumps(quote))
     signed_intent = PublishIntent(signed_data=signed_quote)
     return publish_intent(signed_intent)
+
+
+def deposit_token(account, token: str, amount: float, source_chain: str = None) -> dict:
+    """Deposit any supported token into intents contract"""
+    if token == "NEAR":
+        # Existing NEAR flow
+        wrap_result = wrap_near(account, amount)
+        time.sleep(3)
+        return intent_deposit(account, token, amount)
+    else:
+        # New flow for other tokens
+        token_id = config.get_token_id(token, source_chain)
+        if not token_id:
+            raise ValueError(f"Token {token} not supported on {source_chain}")
+            
+        # Register storage if needed
+        register_token_storage(account, token)
+        
+        # Execute deposit
+        return intent_deposit(account, token, amount)
 
 
 if __name__ == "__main__":
