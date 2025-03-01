@@ -182,9 +182,9 @@ def unwrap_near(account, amount):
         return account.function_call(
             'wrap.near',
             'near_withdraw',
-            {},
+            {"amount": amount_base},
             MAX_GAS,
-            int(amount_base)
+            1  # Attach exactly 1 yoctoNEAR as required by the contract
         )
     except Exception as e:
         logger.error(f"Error unwrapping NEAR: {str(e)}")
