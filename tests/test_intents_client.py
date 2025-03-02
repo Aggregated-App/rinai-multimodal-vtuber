@@ -29,7 +29,10 @@ from clients.near_Intents_client.intents_client import (
     get_future_deadline,
     sign_quote,
     MAX_GAS,
-    unwrap_near
+    unwrap_near,
+    register_intent_public_key,
+    create_account,
+    setup_account
 )
 from clients.near_Intents_client import config  # Import the config module
 from clients.near_Intents_client.config import (
@@ -51,40 +54,21 @@ logger = logging.getLogger(__name__)
 # Load environment variables
 load_dotenv()
 
-# Simple fixture for account setup - reuses your existing initialization
+# Use the client's create_account function
 @pytest.fixture
 def account():
-    account_id = os.getenv('NEAR_ACCOUNT_ID')
-    private_key = os.getenv('NEAR_PRIVATE_KEY')
-    provider = JsonProvider(os.getenv('NEAR_RPC_URL'))
-    key_pair = KeyPair(private_key)
-    signer = Signer(account_id, key_pair)
-    return Account(provider, signer)
+    """Get a NEAR account using the client's create_account function"""
+    return create_account()
 
+# Use the client's setup_account function
 @pytest.fixture
-def setup_account(account):
-    """Setup account with registered public key if needed"""
+def initialized_account():
+    """Get a NEAR account with registered public key using the client's setup_account function"""
     try:
-        print("\nChecking public key registration...")
-        public_key = "ed25519:" + base58.b58encode(account.signer.public_key).decode('utf-8')
-        
-        # Check if already registered
-        result = account.view_function(
-            "intents.near",
-            "has_public_key",
-            {"public_key": public_key}
-        )
-        
-        if not result['result']:
-            print("Public key not registered, registering now...")
-            register_intent_public_key(account)
-            time.sleep(2)  # Wait for registration
-        else:
-            print("Public key already registered")
-            
-        return account
+        account = create_account()
+        return setup_account(account)
     except Exception as e:
-        pytest.fail(f"Failed to check/register public key: {str(e)}")
+        pytest.fail(f"Failed to setup account: {str(e)}")
 
 def test_near_deposit_and_withdraw(account):
     """Test depositing and withdrawing NEAR"""

@@ -1,4 +1,4 @@
-# config.py - Token configuration for Defuse Protocol
+# config.py - Token configuration for NEAR Intents Client
 
 # Token data for a minimal set of tokens (NEAR and USDC)
 TOKENS = [

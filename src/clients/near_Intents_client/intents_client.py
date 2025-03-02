@@ -78,15 +78,6 @@ class PublishIntent(TypedDict):
     quote_hashes: List[str] = []
 
 
-def account(account_path):
-    RPC_NODE_URL = 'https://rpc.mainnet.near.org'
-    content = json.load(open(os.path.expanduser(account_path), 'r'))
-    near_provider = near_api.providers.JsonProvider(RPC_NODE_URL)
-    key_pair = near_api.signer.KeyPair(content["private_key"])
-    signer = near_api.signer.Signer(content["account_id"], key_pair)
-    return near_api.account.Account(near_provider, signer, content["account_id"])
-
-
 def get_asset_id(token):
     return config.to_asset_id(token)
 
@@ -212,9 +203,37 @@ def intent_deposit(account, token, amount):
 
 
 def register_intent_public_key(account):
-    account.function_call("intents.near", "add_public_key", {
-        "public_key": "ed25519:" + base58.b58encode(account.signer.public_key).decode('utf-8')
-    }, MAX_GAS, 1)
+    """
+    Register a public key with the intents contract if not already registered
+    
+    Args:
+        account: NEAR account
+    
+    Returns:
+        str: Status message indicating if key was registered or already exists
+    """
+    try:
+        public_key = "ed25519:" + base58.b58encode(account.signer.public_key).decode('utf-8')
+        
+        # Check if already registered
+        result = account.view_function(
+            "intents.near",
+            "has_public_key",
+            {"public_key": public_key}
+        )
+        
+        if not result['result']:
+            logger.info(f"Registering public key for account {account.account_id}")
+            account.function_call("intents.near", "add_public_key", {
+                "public_key": public_key
+            }, MAX_GAS, 1)
+            return "Key registered"
+        else:
+            logger.info(f"Public key already registered for account {account.account_id}")
+            return "Key already registered"
+    except Exception as e:
+        logger.error(f"Error registering public key: {str(e)}")
+        raise e
 
 
 class IntentRequest(object):
@@ -570,6 +589,40 @@ def deposit_token(account, token: str, amount: float, source_chain: str = None) 
         return intent_deposit(account, token, amount)
 
 
+def create_account():
+    """Create a NEAR account using environment variables"""
+    account_id = os.getenv('NEAR_ACCOUNT_ID')
+    private_key = os.getenv('NEAR_PRIVATE_KEY')
+    provider = near_api.providers.JsonProvider(os.getenv('NEAR_RPC_URL', 'https://rpc.mainnet.near.org'))
+    key_pair = near_api.signer.KeyPair(private_key)
+    signer = near_api.signer.Signer(account_id, key_pair)
+    return near_api.account.Account(provider, signer, account_id)
+
+
+def setup_account(account=None):
+    """
+    Setup account with registered public key if needed
+    
+    Args:
+        account: NEAR account (optional, will create from env vars if not provided)
+        
+    Returns:
+        Account: NEAR account with registered public key
+    """
+    if account is None:
+        account = create_account()
+        
+    try:
+        status = register_intent_public_key(account)
+        logger.info(f"Key registration status: {status}")
+        if status == "Key registered":
+            time.sleep(2)  # Wait for registration
+        return account
+    except Exception as e:
+        logger.error(f"Failed to register public key: {str(e)}")
+        raise e
+
+
 if __name__ == "__main__":
     # Trade between two accounts directly.
     # account1 = utils.account(
@@ -591,6 +644,6 @@ if __name__ == "__main__":
     # print(intent_swap(account1, 'NEAR', 1, 'USDC'))
 
     # Withdraw to external address.
-    account1 = account("<>")
+    account1 = create_account()
     # print(intent_withdraw(account1, "<near account>", "USDC", 1))
     print(intent_withdraw(account1, "<eth address>", "USDC", 1, network='eth'))
