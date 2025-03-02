@@ -29,10 +29,8 @@ This project uses a custom fork of the [ElizaOS Twitter Client](https://github.c
 *   **Tool-Calling Powerhouse:** Equipped with tools including:
     *   **Twitter Agent:** Create and schedule tweets
     *   **Task Scheduling Agent:** Schedule tweet posting and other background tasks
-    *   **Web Queries with Reasoning:** Leverage Perplexity's DeepSeek R1 API for web queries
+    *   **Perplexity Integration:** Leverage Perplexity's DeepSeek R1 API for web queries
     *   **Cryptocurrency Price & Analytics:** Obtain live and historical crypto price data
-    *   **Time & Date Conversion:** Get current time in any location or convert times between different timezones
-    *   **Weather Updates:** Get current weather conditions and forecasts for any location
 *   **Advanced Chat Agent:**  Based on the [Rin AI Chat Agentic Chat Stack](https://github.com/dleerdefi/peak-ai-agent-stack):
     *   **GraphRAG Memory:** Graph-based memory for context-aware responses
     *   **Keyword-Based Intent Recognition:** Fast keyword extraction for memory relevance
@@ -71,7 +69,7 @@ This project uses a custom fork of the [ElizaOS Twitter Client](https://github.c
 4. **Installation:**
    ```bash
    # Clone main repository
-   git clone [rinai-multimodal-vtuber](https://github.com/dleerdefi/rinai-multimodal-vtuber)
+   git clone [Your Main RinAI Multimodal Vtuber Repo URL] rinai-multimodal-vtuber
    cd rinai-multimodal-vtuber
 
    # Setup Python environment
@@ -80,11 +78,10 @@ This project uses a custom fork of the [ElizaOS Twitter Client](https://github.c
    pip install -r requirements.txt
 
    # Setup Twitter API Client
-   git clone [agent-twitter-client](https://github.com/dleerdefi/agent-twitter-client)
+   git clone [Your Forked ElizaOS Twitter Client Repo URL] twitter-client
    cd twitter-client
    npm install
    ```
-
 
 5. **Starting the Services:**
 
