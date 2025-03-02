@@ -128,6 +128,8 @@ def _register_single_account(account, token_id, account_to_register):
             {'account_id': account_to_register}
         )
         
+        logger.info(f"Storage balance check result: {storage_balance}")
+        
         if storage_balance and 'result' in storage_balance and storage_balance['result']:
             logger.info(f"Account {account_to_register} already registered with token contract")
             return True
@@ -135,34 +137,47 @@ def _register_single_account(account, token_id, account_to_register):
         # Not registered, need to register
         logger.info(f"Account {account_to_register} not registered with token contract. Registering...")
         
-        # Use the exact yoctoNEAR amount (0.00125 NEAR = 1,250,000,000,000,000,000,000 yoctoNEAR)
-        result = account.function_call(
-            token_id,
-            'storage_deposit',
-            {'account_id': account_to_register},
-            gas=MAX_GAS,
-            amount="1250000000000000000000"  # 0.00125 NEAR in yoctoNEAR
-        )
-        
-        logger.info(f"Registration result: {result}")
+        # Use the exact yoctoNEAR amount as an integer (not a string)
+        try:
+            # The key fix: Use an integer for amount, not a string
+            deposit_amount = 1250000000000000000000  # 0.00125 NEAR in yoctoNEAR
+            
+            result = account.function_call(
+                token_id,
+                'storage_deposit',
+                {'account_id': account_to_register},
+                gas=MAX_GAS,
+                amount=deposit_amount  # Integer, not string
+            )
+            
+            logger.info(f"Registration result: {result}")
+        except Exception as reg_error:
+            logger.error(f"Error during registration function call: {str(reg_error)}")
+            return False
         
         # Verify registration was successful
         time.sleep(5)  # Wait for transaction to complete
-        storage_balance = account.view_function(
-            token_id,
-            'storage_balance_of',
-            {'account_id': account_to_register}
-        )
-        
-        if storage_balance and 'result' in storage_balance and storage_balance['result']:
-            logger.info(f"Successfully registered {account_to_register} with token contract")
-            return True
-        else:
-            logger.error(f"Failed to register {account_to_register} with token contract")
+        try:
+            storage_balance = account.view_function(
+                token_id,
+                'storage_balance_of',
+                {'account_id': account_to_register}
+            )
+            
+            logger.info(f"Storage balance check after registration: {storage_balance}")
+            
+            if storage_balance and 'result' in storage_balance and storage_balance['result']:
+                logger.info(f"Successfully registered {account_to_register} with token contract")
+                return True
+            else:
+                logger.error(f"Failed to register {account_to_register} with token contract")
+                return False
+        except Exception as check_error:
+            logger.error(f"Error checking registration status: {str(check_error)}")
             return False
             
     except Exception as e:
-        logger.error(f"Error registering {account_to_register} with token contract: {str(e)}")
+        logger.error(f"Error in registration process: {str(e)}")
         return False
 
 
@@ -618,6 +633,13 @@ def withdraw_same_chain(account, token: str, amount: float, destination_address:
     token_id = config.get_token_id(token, "near")
     destination_address = destination_address or account.account_id
     
+    logger.info(f"=== WITHDRAW SAME CHAIN ===")
+    logger.info(f"Token: {token}")
+    logger.info(f"Token ID: {token_id}")
+    logger.info(f"Amount: {amount}")
+    logger.info(f"Destination: {destination_address}")
+    logger.info(f"Source Chain: {source_chain}")
+    
     # For NEAR token, we're always on NEAR chain
     if token == "NEAR":
         source_chain = "near"
@@ -632,9 +654,14 @@ def withdraw_same_chain(account, token: str, amount: float, destination_address:
     if not source_chain:
         raise ValueError(f"Could not find source chain for {token} with sufficient balance")
     
+    logger.info(f"Determined source chain: {source_chain}")
+    
     # Check if token needs conversion to NEAR chain
     current_chain_asset = config.get_defuse_asset_id(token, source_chain)
     near_chain_asset = config.get_defuse_asset_id(token, "near")
+    
+    logger.info(f"Current chain asset: {current_chain_asset}")
+    logger.info(f"NEAR chain asset: {near_chain_asset}")
     
     if current_chain_asset != near_chain_asset and source_chain != "near":
         logger.info(f"\nConverting {token} from {source_chain} to NEAR chain...")
@@ -645,6 +672,8 @@ def withdraw_same_chain(account, token: str, amount: float, destination_address:
         
         if not best_option:
             raise Exception(f"No conversion quote available for {token} to NEAR chain")
+        
+        logger.info(f"Conversion quote: {best_option}")
         
         # Create and publish conversion quote first
         conversion_quote = create_token_diff_quote(
@@ -674,7 +703,37 @@ def withdraw_same_chain(account, token: str, amount: float, destination_address:
         # No conversion needed, use direct amount
         amount_base = config.to_decimals(amount, token)
     
+    logger.info(f"Final amount_base for withdrawal: {amount_base}")
+    
+    # Register storage for the token before withdrawal
+    if token != "NEAR":  # NEAR token doesn't need registration
+        logger.info(f"\n=== REGISTERING TOKEN STORAGE ===")
+        logger.info(f"Token: {token}")
+        logger.info(f"Token ID: {token_id}")
+        logger.info(f"Destination: {destination_address}")
+        
+        registration_success = register_token_storage(account, token, destination_address)
+        logger.info(f"Registration success: {registration_success}")
+        
+        if not registration_success:
+            logger.warning(f"Failed to register {destination_address} with {token} token. Withdrawal may fail.")
+            
+        # Double-check registration
+        try:
+            storage_balance = account.view_function(
+                token_id,
+                'storage_balance_of',
+                {'account_id': destination_address}
+            )
+            logger.info(f"Storage balance check after registration: {storage_balance}")
+            
+            if not storage_balance.get('result'):
+                logger.warning(f"Account still not registered with {token} token after registration attempt")
+        except Exception as e:
+            logger.error(f"Error checking storage balance: {str(e)}")
+    
     # Now do the withdrawal with converted amount
+    logger.info(f"\n=== CREATING WITHDRAWAL INTENT ===")
     quote = Quote(
         signer_id=account.account_id,
         nonce=base64.b64encode(random.getrandbits(256).to_bytes(32, byteorder='big')).decode('utf-8'),
@@ -684,13 +743,20 @@ def withdraw_same_chain(account, token: str, amount: float, destination_address:
             "intent": "ft_withdraw",
             "token": token_id,
             "receiver_id": destination_address,
-            "amount": amount_base
+            "amount": str(amount_base)
         }]
     )
     
+    logger.info(f"Withdrawal quote: {json.dumps(quote, indent=2)}")
+    
     signed_quote = sign_quote(account, json.dumps(quote))
     signed_intent = PublishIntent(signed_data=signed_quote)
-    return publish_intent(signed_intent)
+    
+    logger.info(f"Publishing withdrawal intent...")
+    result = publish_intent(signed_intent)
+    logger.info(f"Withdrawal result: {json.dumps(result, indent=2)}")
+    
+    return result
 
 
 def withdraw_cross_chain(account, token: str, amount: float, destination_chain: str, destination_address: str = None) -> dict:
