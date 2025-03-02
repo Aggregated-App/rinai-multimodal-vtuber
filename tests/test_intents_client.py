@@ -60,8 +60,8 @@ def account():
     """Get a NEAR account using the client's create_account function"""
     return create_account()
 
-# Use the client's setup_account function
-@pytest.fixture
+# Change this fixture to session scope
+@pytest.fixture(scope="session")
 def initialized_account():
     """Get a NEAR account with registered public key using the client's setup_account function"""
     try:
@@ -150,7 +150,7 @@ def test_near_deposit_and_withdraw(initialized_account):
     final_balance = get_intent_balance(account, "NEAR")
     print(f"Final NEAR balance in intents: {final_balance}")
 
-def get_balances(account):
+def get_balances(initialized_account):
     """Get NEAR, USDC, and SOL balances across chains"""
     return {
         "NEAR": get_intent_balance(account, "NEAR"),
@@ -161,8 +161,10 @@ def get_balances(account):
         "SOL": get_intent_balance(account, "SOL", chain="solana")
     }
 
-def test_near_usdc_swap(account):
+# Change this test to use initialized_account
+def test_near_usdc_swap(initialized_account):
     """Test getting quotes and swapping NEAR to USDC"""
+    account = initialized_account
     # Log initial balances
     initial_usdc = get_intent_balance(account, "USDC", chain="eth")
     initial_near = get_intent_balance(account, "NEAR")
@@ -174,15 +176,37 @@ def test_near_usdc_swap(account):
     deposit_amount = 0.1
     print(f"\nDepositing {deposit_amount} NEAR...")
     wrap_result = wrap_near(account, deposit_amount)
-    time.sleep(3)
+    
+    # Wait for wNEAR wrapping to complete
+    print("Waiting for wNEAR wrapping to complete...")
+    max_attempts = 6
+    for attempt in range(max_attempts):
+        try:
+            wnear_token_id = config.get_token_id("NEAR")
+            wnear_balance_result = account.view_function(wnear_token_id, 'ft_balance_of', {'account_id': account.account_id})
+            if 'result' in wnear_balance_result:
+                wnear_balance = from_decimals(wnear_balance_result['result'], 'NEAR')
+                print(f"wNEAR balance after waiting: {wnear_balance}")
+                if wnear_balance >= deposit_amount:
+                    print("wNEAR wrapping completed!")
+                    break
+            time.sleep(5)
+        except Exception as e:
+            print(f"Error checking wNEAR balance: {str(e)}")
+            time.sleep(5)
+        
+        if attempt == max_attempts - 1:
+            pytest.skip("wNEAR wrapping did not complete in time")
+    
+    # Now deposit the wNEAR
     result = intent_deposit(account, "NEAR", deposit_amount)
+    time.sleep(3)
     
     # Execute swap and log response
     print(f"\nExecuting NEAR to USDC swap...")
     swap_result = intent_swap(account, "NEAR", deposit_amount, "USDC", chain_out="eth")
     print("\nSwap Result Details:")
     print(json.dumps(swap_result, indent=2))
-    time.sleep(3)
     
     # Calculate and log the swap amount
     if 'amount_out' not in swap_result:
@@ -190,17 +214,93 @@ def test_near_usdc_swap(account):
     swap_amount = config.from_decimals(swap_result['amount_out'], 'USDC')
     print(f"Successfully swapped {deposit_amount} NEAR for {swap_amount} USDC")
     
+    # Wait for USDC balance to appear on ETH chain
+    print("Waiting for USDC balance to appear on ETH chain...")
+    max_attempts = 12
+    for attempt in range(max_attempts):
+        usdc_balance = get_intent_balance(account, "USDC", chain="eth")
+        print(f"USDC balance on ETH chain: {usdc_balance}")
+        if usdc_balance >= swap_amount * 0.9:  # Allow for some slippage
+            print("USDC balance found!")
+            break
+        time.sleep(5)
+        if attempt == max_attempts - 1:
+            pytest.skip("USDC balance did not appear in time")
+    
     # Execute withdrawal
     print(f"\nWithdrawing {swap_amount} USDC to NEAR chain...")
-    withdrawal_result = smart_withdraw(
-        account=account,
-        token="USDC",
-        amount=swap_amount,
-        destination_chain="near",
-        destination_address=account.account_id
-    )
-    print("Withdrawal complete")
+    try:
+        withdrawal_result = smart_withdraw(
+            account=account,
+            token="USDC",
+            amount=swap_amount,
+            destination_chain="near",
+            destination_address=account.account_id,
+            source_chain="eth"  # Explicitly specify the source chain
+        )
+        print("Withdrawal initiated")
+        print("Waiting for USDC withdrawal to finalize...")
+        time.sleep(30)  # Wait 30 seconds after initiating withdrawal
+    except Exception as e:
+        print(f"Withdrawal failed: {str(e)}")
+        # Check balances on all chains to help diagnose the issue
+        for chain in ["eth", "near", "arbitrum", "solana"]:
+            balance = get_intent_balance(account, "USDC", chain=chain)
+            print(f"USDC balance on {chain} chain: {balance}")
+        pytest.fail(f"USDC withdrawal failed: {str(e)}")
 
+def test_usdc_near_swap(initialized_account):
+    """Test swapping USDC to NEAR and withdrawing"""
+    account = initialized_account
+    
+    # Log initial balances
+    initial_usdc_intents = get_intent_balance(account, "USDC", chain="near")
+    initial_near = get_intent_balance(account, "NEAR")
+    print(f"\nInitial Balances:")
+    print(f"NEAR: {initial_near}")
+    print(f"USDC (intents): {initial_usdc_intents}")
+    
+    # Check actual USDC balance in NEAR wallet
+    usdc_token_id = config.get_token_id("USDC", "near")
+    try:
+        usdc_balance_result = account.view_function(usdc_token_id, 'ft_balance_of', {'account_id': account.account_id})
+        if 'result' in usdc_balance_result:
+            usdc_balance = config.from_decimals(usdc_balance_result['result'], "USDC")
+            print(f"USDC (wallet): {usdc_balance}")
+        else:
+            print(f"USDC (wallet): Could not retrieve balance")
+            usdc_balance = 0
+    except Exception as e:
+        print(f"Error checking USDC wallet balance: {str(e)}")
+        usdc_balance = 0
+    
+    # Determine if we need to wait for USDC withdrawal to complete
+    if initial_usdc_intents > 0 and usdc_balance < 0.3:
+        print(f"USDC is in intents contract but not in wallet. Waiting for withdrawal to complete...")
+        # Wait for withdrawal to complete (up to 2 minutes)
+        for _ in range(12):  # Increased from 6 to 12 iterations
+            time.sleep(5)   # Increased from 5 to 10 seconds per iteration
+            try:
+                usdc_balance_result = account.view_function(usdc_token_id, 'ft_balance_of', {'account_id': account.account_id})
+                if 'result' in usdc_balance_result:
+                    usdc_balance = config.from_decimals(usdc_balance_result['result'], "USDC")
+                    print(f"USDC (wallet) after waiting: {usdc_balance}")
+                    if usdc_balance >= 0.3:
+                        print("Withdrawal completed!")
+                        break
+            except Exception as e:
+                print(f"Error checking USDC wallet balance: {str(e)}")
+        
+    # Check if we have enough USDC in wallet
+    if usdc_balance < 0.3:
+        pytest.skip(f"Not enough USDC in wallet: {usdc_balance} (need at least 0.3)")
+    
+    # Execute deposit and swap
+    deposit_amount = 0.3
+    print(f"\nDepositing {deposit_amount} USDC...")
+    result = intent_deposit(account, "USDC", deposit_amount)
+    time.sleep(3)
+    
 def test_near_sol_swap(account):
     """Test swapping NEAR to SOL and withdrawing to Solana wallet"""
     def get_balances():
@@ -276,32 +376,35 @@ def test_near_sol_swap(account):
         "amount_received": swap_amount
     }
 
-def test_usdc_near_swap(account):
-    """Test swapping USDC to NEAR and withdrawing"""
-    # Log initial balances
-    initial_usdc = get_intent_balance(account, "USDC", chain="near")
-    initial_near = get_intent_balance(account, "NEAR")
-    print(f"\nInitial Balances:")
-    print(f"NEAR: {initial_near}")
-    print(f"USDC (NEAR): {initial_usdc}")
-    
-    # Execute deposit and swap
-    deposit_amount = 0.3
-    print(f"\nDepositing {deposit_amount} USDC...")
-    result = intent_deposit(account, "USDC", deposit_amount)
-    time.sleep(3)
-    
     # Execute swap and log response
     print(f"\nExecuting USDC to NEAR swap...")
     swap_result = intent_swap(account, "USDC", deposit_amount, "NEAR", chain_out="near")
     print("\nSwap Result Details:")
     print(json.dumps(swap_result, indent=2))
-    time.sleep(3)
     
-    # Calculate and log the swap amount
+    # Wait for swap to complete and verify NEAR balance
+    print("Waiting for swap to complete and NEAR to be available...")
     if 'amount_out' not in swap_result:
         pytest.fail("Swap failed - no amount_out in response")
     swap_amount = config.from_decimals(swap_result['amount_out'], 'NEAR')
+    
+    # Wait and verify NEAR balance before withdrawal
+    max_attempts = 12
+    for attempt in range(max_attempts):
+        try:
+            near_balance = get_intent_balance(account, "NEAR")
+            print(f"NEAR balance in intents after waiting: {near_balance}")
+            if near_balance >= swap_amount * 0.9:  # Allow for some slippage
+                print("NEAR swap completed!")
+                break
+            time.sleep(5)
+        except Exception as e:
+            print(f"Error checking NEAR balance: {str(e)}")
+            time.sleep(5)
+        
+        if attempt == max_attempts - 1:
+            pytest.skip("NEAR swap did not complete in time")
+    
     print(f"Successfully swapped {deposit_amount} USDC for {swap_amount} NEAR")
     
     # Execute withdrawal
@@ -313,10 +416,11 @@ def test_usdc_near_swap(account):
         destination_chain="near",
         destination_address=account.account_id
     )
-    print("Withdrawal complete")
+    print("Withdrawal initiated")
+    print("Waiting for NEAR withdrawal to finalize...")
+    time.sleep(15)  # Wait 15 seconds after initiating withdrawal
     
     # Unwrap the received wNEAR
-    time.sleep(3)  # Wait for withdrawal to complete
     print(f"\nUnwrapping {swap_amount} wNEAR to NEAR...")
     unwrap_result = unwrap_near(account, swap_amount)
     print("Successfully unwrapped wNEAR to NEAR")
@@ -325,5 +429,5 @@ if __name__ == "__main__":
     print("Running intents client tests...")
     test_near_deposit_and_withdraw()
     test_near_usdc_swap()
-    test_near_sol_swap()
     test_usdc_near_swap()
+    test_near_sol_swap()

@@ -82,36 +82,88 @@ def get_asset_id(token):
     return config.to_asset_id(token)
 
 
-def register_token_storage(account, token, other_account=None):
-    """Register token storage for an account"""
-    account_id = other_account if other_account else account.account_id
-    token_id = config.get_token_id(token)
-    if not token_id:
-        raise ValueError(f"Token {token} not supported")
+def register_token_storage(account, token, destination_address=None, other_account=None):
+    """
+    Register storage for a token contract
     
-    try:    
-        balance = account.view_function(token_id, 'storage_balance_of', {'account_id': account_id})['result']
-        if not balance:
-            logger.info(f'Registering {account_id} for {token} storage on {token_id}')
-            account.function_call(token_id, 'storage_deposit',
-                {"account_id": account_id}, MAX_GAS, 1250000000000000000000)
-            time.sleep(2)  # Wait for registration to complete
-            return "Storage registered"
+    Args:
+        account: NEAR account
+        token: Token symbol (e.g., 'USDC', 'NEAR')
+        destination_address: Address to register (defaults to account.account_id)
+        other_account: Another account to register (optional)
+    
+    Returns:
+        bool: True if registration was successful or already registered
+    """
+    if token == "NEAR":
+        return True  # NEAR token doesn't need registration
+        
+    destination_address = destination_address or account.account_id
+    token_id = config.get_token_id(token, "near")
+    
+    if not token_id:
+        logger.error(f"Token {token} not supported on NEAR chain")
+        return False
+    
+    # Register the main account
+    success = _register_single_account(account, token_id, destination_address)
+    
+    # Register the other account if provided
+    if other_account and success:
+        other_success = _register_single_account(account, token_id, other_account)
+        return success and other_success
+        
+    return success
+
+
+def _register_single_account(account, token_id, account_to_register):
+    """Helper function to register a single account with a token contract"""
+    logger.info(f"Checking if {account_to_register} is registered with token contract {token_id}...")
+    
+    try:
+        # Check if already registered
+        storage_balance = account.view_function(
+            token_id,
+            'storage_balance_of',
+            {'account_id': account_to_register}
+        )
+        
+        if storage_balance and 'result' in storage_balance and storage_balance['result']:
+            logger.info(f"Account {account_to_register} already registered with token contract")
+            return True
+            
+        # Not registered, need to register
+        logger.info(f"Account {account_to_register} not registered with token contract. Registering...")
+        
+        # Use the exact yoctoNEAR amount (0.00125 NEAR = 1,250,000,000,000,000,000,000 yoctoNEAR)
+        result = account.function_call(
+            token_id,
+            'storage_deposit',
+            {'account_id': account_to_register},
+            gas=MAX_GAS,
+            amount="1250000000000000000000"  # 0.00125 NEAR in yoctoNEAR
+        )
+        
+        logger.info(f"Registration result: {result}")
+        
+        # Verify registration was successful
+        time.sleep(5)  # Wait for transaction to complete
+        storage_balance = account.view_function(
+            token_id,
+            'storage_balance_of',
+            {'account_id': account_to_register}
+        )
+        
+        if storage_balance and 'result' in storage_balance and storage_balance['result']:
+            logger.info(f"Successfully registered {account_to_register} with token contract")
+            return True
         else:
-            logger.info(f'Storage already registered for {account_id} on {token_id}')
-            return "Storage already registered"
+            logger.error(f"Failed to register {account_to_register} with token contract")
+            return False
+            
     except Exception as e:
-        logger.warning(f"Error checking storage balance for {token}: {str(e)}")
-        # Try direct registration
-        logger.info(f'Attempting to register {account_id} for {token} storage directly')
-        try:
-            account.function_call(token_id, 'storage_deposit',
-                {"account_id": account_id}, MAX_GAS, 1250000000000000000000)
-            time.sleep(2)
-            return "Storage registration attempted"
-        except Exception as reg_error:
-            logger.error(f"Failed to register storage for {token}: {str(reg_error)}")
-            raise reg_error
+        logger.error(f"Error registering {account_to_register} with token contract: {str(e)}")
+        return False
 
 
 def sign_quote(account, quote):
@@ -202,22 +254,73 @@ def unwrap_near(account, amount):
 
 def intent_deposit(account, token, amount):
     """Deposit tokens into the intents contract"""
-    token_id = config.get_token_id(token)
-    if not token_id:
+    # Get token details from config
+    token_details = config.get_token_by_symbol(token)
+    if not token_details:
         raise ValueError(f"Token {token} not supported")
+    
+    # Get the correct token ID for the NEAR chain
+    if "chains" in token_details and "near" in token_details["chains"]:
+        token_id = token_details["chains"]["near"]["token_id"]
+    else:
+        raise ValueError(f"Token {token} not available on NEAR chain")
+    
+    logger.info(f"Depositing {amount} {token} using token_id: {token_id}")
+    
+    # Check current balance before deposit
+    try:
+        current_balance = account.view_function(token_id, 'ft_balance_of', {'account_id': account.account_id})
+        logger.info(f"Current {token} balance: {current_balance}")
         
-    register_token_storage(account, token, other_account="intents.near")
+        if 'result' in current_balance:
+            human_balance = from_decimals(current_balance['result'], token)
+            logger.info(f"Current {token} balance (human readable): {human_balance}")
+            
+            if human_balance < amount:
+                logger.error(f"Insufficient {token} balance: have {human_balance}, need {amount}")
+                raise ValueError(f"Insufficient {token} balance: have {human_balance}, need {amount}")
+    except Exception as e:
+        logger.warning(f"Could not check {token} balance: {str(e)}")
+    
+    # Register storage if needed (for both user and intents contract)
+    try:
+        register_token_storage(account, token, other_account="intents.near")
+    except Exception as e:
+        logger.error(f"Error registering token storage: {str(e)}")
+        raise e
     
     # Use config's decimal conversion
     amount_base = config.to_decimals(amount, token)
     if not amount_base:
         raise ValueError(f"Invalid amount for {token}")
+    
+    logger.info(f"Transferring {amount_base} base units of {token} to intents.near")
+    
+    # Execute the transfer
+    try:
+        result = account.function_call(token_id, 'ft_transfer_call', {
+            "receiver_id": "intents.near",
+            "amount": amount_base,
+            "msg": ""
+        }, MAX_GAS, 1)
         
-    account.function_call(token_id, 'ft_transfer_call', {
-        "receiver_id": "intents.near",
-        "amount": amount_base,
-        "msg": ""
-    }, MAX_GAS, 1)
+        logger.info(f"Transfer result: {result}")
+        return result
+    except Exception as e:
+        logger.error(f"Transfer failed: {str(e)}")
+        
+        # Check if this is a balance issue
+        if "doesn't have enough balance" in str(e):
+            try:
+                # Check balance again to confirm
+                balance_check = account.view_function(token_id, 'ft_balance_of', {'account_id': account.account_id})
+                if 'result' in balance_check:
+                    human_balance = from_decimals(balance_check['result'], token)
+                    logger.error(f"Confirmed insufficient balance: have {human_balance}, need {amount}")
+            except Exception:
+                pass
+        
+        raise e
 
 
 def register_intent_public_key(account):
@@ -276,58 +379,37 @@ def register_intent_public_key(account):
 
 
 def register_intents_storage(account):
-    """
-    Register storage for the intents contract if needed
-    
-    Args:
-        account: NEAR account
-        
-    Returns:
-        str: Status message
-    """
+    """Register storage with the intents contract"""
     try:
-        # The intents contract doesn't have storage_balance_of method
-        # Try direct registration instead
-        logger.info(f"Attempting to register storage for {account.account_id} on intents contract")
+        # Check if already registered
+        storage_balance = account.view_function("intents.near", 'storage_balance_of', {'account_id': account.account_id})
+        logger.info(f"Intents storage balance check result: {storage_balance}")
         
-        try:
-            # Some contracts use storage_deposit
-            account.function_call(
+        if not storage_balance.get('result'):
+            logger.info(f"Registering storage for {account.account_id} with intents.near")
+            result = account.function_call(
                 "intents.near",
-                "storage_deposit",
-                {"account_id": account.account_id},
+                'storage_deposit',  # Changed from register_account to storage_deposit
+                {'account_id': account.account_id},
                 MAX_GAS,
-                1250000000000000000000  # 1.25 NEAR for storage
+                1250000000000000000000  # 0.00125 NEAR
             )
+            logger.info(f"Storage registration result: {result}")
             time.sleep(2)
-            return "Storage registration attempted"
-        except Exception as e1:
-            if "MethodNotFound" in str(e1):
-                # If storage_deposit doesn't exist, try register_account
-                try:
-                    logger.info("Trying register_account method instead")
-                    account.function_call(
-                        "intents.near",
-                        "register_account",
-                        {"account_id": account.account_id},
-                        MAX_GAS,
-                        1250000000000000000000
-                    )
-                    time.sleep(2)
-                    return "Account registration attempted"
-                except Exception as e2:
-                    if "MethodNotFound" in str(e2):
-                        # If neither method exists, the contract might not need registration
-                        logger.info("No registration method found, assuming registration not needed")
-                        return "Registration not needed"
-                    else:
-                        raise e2
-            else:
-                raise e1
+            
+            # Verify registration was successful
+            verify_storage = account.view_function("intents.near", 'storage_balance_of', {'account_id': account.account_id})
+            logger.info(f"Storage registration verification: {verify_storage}")
+            if not verify_storage.get('result'):
+                logger.error(f"Storage registration failed for {account.account_id} with intents.near")
+                return "Storage registration failed"
+            return "Storage registered"
+        else:
+            logger.info(f"Account {account.account_id} already registered with intents.near")
+            return "Already registered"
     except Exception as e:
-        logger.error(f"Error registering with intents contract: {str(e)}")
-        # Don't raise the error, just return a status
-        return f"Registration error: {str(e)}"
+        logger.error(f"Error registering intents storage: {str(e)}")
+        return f"Error: {str(e)}"
 
 
 class IntentRequest(object):
