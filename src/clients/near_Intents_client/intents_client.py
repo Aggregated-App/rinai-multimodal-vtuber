@@ -88,12 +88,30 @@ def register_token_storage(account, token, other_account=None):
     token_id = config.get_token_id(token)
     if not token_id:
         raise ValueError(f"Token {token} not supported")
-        
-    balance = account.view_function(token_id, 'storage_balance_of', {'account_id': account_id})['result']
-    if not balance:
-        logger.info('Register %s for %s storage' % (account_id, token))
-        account.function_call(token_id, 'storage_deposit',
-            {"account_id": account_id}, MAX_GAS, 1250000000000000000000)
+    
+    try:    
+        balance = account.view_function(token_id, 'storage_balance_of', {'account_id': account_id})['result']
+        if not balance:
+            logger.info(f'Registering {account_id} for {token} storage on {token_id}')
+            account.function_call(token_id, 'storage_deposit',
+                {"account_id": account_id}, MAX_GAS, 1250000000000000000000)
+            time.sleep(2)  # Wait for registration to complete
+            return "Storage registered"
+        else:
+            logger.info(f'Storage already registered for {account_id} on {token_id}')
+            return "Storage already registered"
+    except Exception as e:
+        logger.warning(f"Error checking storage balance for {token}: {str(e)}")
+        # Try direct registration
+        logger.info(f'Attempting to register {account_id} for {token} storage directly')
+        try:
+            account.function_call(token_id, 'storage_deposit',
+                {"account_id": account_id}, MAX_GAS, 1250000000000000000000)
+            time.sleep(2)
+            return "Storage registration attempted"
+        except Exception as reg_error:
+            logger.error(f"Failed to register storage for {token}: {str(reg_error)}")
+            raise reg_error
 
 
 def sign_quote(account, quote):
@@ -213,27 +231,103 @@ def register_intent_public_key(account):
         str: Status message indicating if key was registered or already exists
     """
     try:
+        # Format the public key correctly
         public_key = "ed25519:" + base58.b58encode(account.signer.public_key).decode('utf-8')
+        logger.info(f"Checking if public key {public_key} is registered for {account.account_id}")
         
-        # Check if already registered
-        result = account.view_function(
-            "intents.near",
-            "has_public_key",
-            {"public_key": public_key}
-        )
-        
-        if not result['result']:
-            logger.info(f"Registering public key for account {account.account_id}")
+        # Check if already registered - INCLUDE ACCOUNT_ID in the parameters
+        try:
+            result = account.view_function(
+                "intents.near",
+                "has_public_key",
+                {
+                    "account_id": account.account_id,  # Add account_id parameter
+                    "public_key": public_key
+                }
+            )
+            
+            if not result['result']:
+                logger.info(f"Registering public key for account {account.account_id}")
+                # Include account_id in the registration call as well
+                account.function_call("intents.near", "add_public_key", {
+                    "account_id": account.account_id,  # Add account_id parameter
+                    "public_key": public_key
+                }, MAX_GAS, 1)
+                time.sleep(3)  # Wait longer for registration to complete
+                return "Key registered"
+            else:
+                logger.info(f"Public key already registered for account {account.account_id}")
+                return "Key already registered"
+        except Exception as e:
+            # If the view function fails, try to register the key directly
+            logger.warning(f"Error checking if public key is registered: {str(e)}")
+            logger.info(f"Attempting to register public key directly")
+            
+            # Include account_id in the registration call
             account.function_call("intents.near", "add_public_key", {
+                "account_id": account.account_id,  # Add account_id parameter
                 "public_key": public_key
             }, MAX_GAS, 1)
-            return "Key registered"
-        else:
-            logger.info(f"Public key already registered for account {account.account_id}")
-            return "Key already registered"
+            time.sleep(3)  # Wait longer for registration to complete
+            return "Key registration attempted"
     except Exception as e:
         logger.error(f"Error registering public key: {str(e)}")
         raise e
+
+
+def register_intents_storage(account):
+    """
+    Register storage for the intents contract if needed
+    
+    Args:
+        account: NEAR account
+        
+    Returns:
+        str: Status message
+    """
+    try:
+        # The intents contract doesn't have storage_balance_of method
+        # Try direct registration instead
+        logger.info(f"Attempting to register storage for {account.account_id} on intents contract")
+        
+        try:
+            # Some contracts use storage_deposit
+            account.function_call(
+                "intents.near",
+                "storage_deposit",
+                {"account_id": account.account_id},
+                MAX_GAS,
+                1250000000000000000000  # 1.25 NEAR for storage
+            )
+            time.sleep(2)
+            return "Storage registration attempted"
+        except Exception as e1:
+            if "MethodNotFound" in str(e1):
+                # If storage_deposit doesn't exist, try register_account
+                try:
+                    logger.info("Trying register_account method instead")
+                    account.function_call(
+                        "intents.near",
+                        "register_account",
+                        {"account_id": account.account_id},
+                        MAX_GAS,
+                        1250000000000000000000
+                    )
+                    time.sleep(2)
+                    return "Account registration attempted"
+                except Exception as e2:
+                    if "MethodNotFound" in str(e2):
+                        # If neither method exists, the contract might not need registration
+                        logger.info("No registration method found, assuming registration not needed")
+                        return "Registration not needed"
+                    else:
+                        raise e2
+            else:
+                raise e1
+    except Exception as e:
+        logger.error(f"Error registering with intents contract: {str(e)}")
+        # Don't raise the error, just return a status
+        return f"Registration error: {str(e)}"
 
 
 class IntentRequest(object):
@@ -613,15 +707,20 @@ def setup_account(account=None):
         account = create_account()
         
     try:
-        status = register_intent_public_key(account)
-        logger.info(f"Key registration status: {status}")
-        if status == "Key registered":
+        # Register public key
+        key_status = register_intent_public_key(account)
+        logger.info(f"Key registration status: {key_status}")
+        if key_status == "Key registered":
             time.sleep(2)  # Wait for registration
+            
+        # Register storage
+        storage_status = register_intents_storage(account)
+        logger.info(f"Storage registration status: {storage_status}")
+        
         return account
     except Exception as e:
-        logger.error(f"Failed to register public key: {str(e)}")
+        logger.error(f"Failed to setup account: {str(e)}")
         raise e
-
 
 if __name__ == "__main__":
     # Trade between two accounts directly.

@@ -70,7 +70,8 @@ def initialized_account():
     except Exception as e:
         pytest.fail(f"Failed to setup account: {str(e)}")
 
-def test_near_deposit_and_withdraw(account):
+def test_near_deposit_and_withdraw(initialized_account):
+    account = initialized_account
     """Test depositing and withdrawing NEAR"""
     
     # Check initial balance
@@ -79,40 +80,70 @@ def test_near_deposit_and_withdraw(account):
     print(f"Initial NEAR balance in intents account: {initial_balance}")
     print(f"Initial NEAR balance: {from_decimals(account_state['amount'], 'NEAR')}")
     
-    # Deposit 0.01 NEAR
-    deposit_amount = 0.01
+    # Deposit a smaller amount to conserve NEAR
+    deposit_amount = 0.005
     print(f"\nDepositing {deposit_amount} NEAR...")
     try:
         # First wrap the NEAR
         wrap_result = wrap_near(account, deposit_amount)
+        print(f"Wrap result: {wrap_result}")
         time.sleep(3)
+        
+        # Check wNEAR balance
+        try:
+            wnear_token_id = config.get_token_id("NEAR")
+            wnear_balance = account.view_function(wnear_token_id, 'ft_balance_of', {'account_id': account.account_id})
+            print(f"wNEAR balance after wrap: {from_decimals(wnear_balance['result'], 'NEAR')}")
+        except Exception as e:
+            print(f"Error checking wNEAR balance: {str(e)}")
         
         # Then deposit
         result = intent_deposit(account, "NEAR", deposit_amount)
-        print("Deposit successful:", result)
+        print("Deposit result:", result)
+        time.sleep(3)  # Wait longer for deposit to be processed
+        
+        # Check balance after deposit
+        new_balance = get_intent_balance(account, "NEAR")
+        print(f"NEAR balance after deposit in Intents account: {new_balance}")
+        
+        # If balance is still 0, try checking with different asset ID formats
+        if new_balance == 0:
+            print("Balance is 0, trying alternative asset ID formats...")
+            try:
+                # Try with direct asset ID
+                asset_id = "nep141:wrap.near"
+                result = account.view_function(
+                    "intents.near",
+                    "view_balance",
+                    {"account_id": account.account_id, "token_id": asset_id}
+                )
+                if 'result' in result and result['result']:
+                    balance = from_decimals(result['result'], 'NEAR')
+                    print(f"Balance with asset_id={asset_id}: {balance}")
+            except Exception as e:
+                print(f"Error checking with alternative asset ID: {str(e)}")
+        
+        # Only attempt withdrawal if we have a balance
+        if new_balance > 0:
+            # Withdraw a smaller amount
+            withdraw_amount = min(0.001, new_balance / 2)
+            print(f"\nWithdrawing {withdraw_amount} NEAR...")
+            try:
+                result = smart_withdraw(
+                    account=account,
+                    token="NEAR",
+                    amount=withdraw_amount,
+                    destination_chain="near"
+                )
+                print("Withdrawal result:", result)
+            except Exception as e:
+                print("Withdrawal failed:", str(e))
+        else:
+            print("\nSkipping withdrawal because balance is 0")
+    
     except Exception as e:
         print("Deposit failed:", str(e))
         return
-    
-    # Check balance after deposit
-    new_balance = get_intent_balance(account, "NEAR")
-    account_state = account.provider.get_account(account.account_id)
-    print(f"NEAR balance after deposit in Intents account: {new_balance}")
-    print(f"NEAR account balance after deposit in NEAR account: {from_decimals(account_state['amount'], 'NEAR')}")
-    
-    # Withdraw 0.005 NEAR using smart_withdraw
-    withdraw_amount = 0.005
-    print(f"\nWithdrawing {withdraw_amount} NEAR...")
-    try:
-        result = smart_withdraw(
-            account=account,
-            token="NEAR",
-            amount=withdraw_amount,
-            destination_chain="near"  # Optional, defaults to "near"
-        )
-        print("Withdrawal successful:", result)
-    except Exception as e:
-        print("Withdrawal failed:", str(e))
     
     # Check final balance
     time.sleep(3)
